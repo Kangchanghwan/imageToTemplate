@@ -52,3 +52,42 @@
 - elgrim 동기화 경로: `~/sheetparser`. 60초 넘는 작업은 nohup + 로그 폴링 (긴 ssh 동기 실행은 끊김).
 - `vlm` 컨테이너(Qwen3-VL-32B, GPU 두 장 사용)는 절대 중지/재시작하지 않는다.
 - Apps Script 웹앱 URL/키는 `.env`(git 제외)에: `SHEETS_WEBAPP_URL=`, `SHEETS_WEBAPP_KEY=`
+
+---
+# v2 추가: 페이지 전체 재현 (2026-10-05 2라운드)
+
+목표 변경: 표만이 아니라 **페이지 전체**(표 위 제목/작성자 줄, 표 아래 신청일/서명란, 서명 이미지 포함)를 시트에 원본 이미지와 최대한 같게 재현한다.
+시트의 A1 왼쪽 위 = 용지 왼쪽 위. A4·100%·여백 0으로 PDF를 내보내면 원본 페이지와 1:1로 겹쳐야 한다.
+
+## PageSpec (version 2) = TableSpec v1 확장
+```json
+{
+  "version": 2, "mode": "page",
+  "source": {...}, "page_mm": [210, 297],
+  "columns": [...], "rows": [...],      // 페이지 전체를 덮는 격자(시트 px). 열 합계 ≈ 794px
+  "cells": [{"r","c","rs","cs","text","h","v","size_pt","bold","wrap","bg","src_bbox",
+             "font": "Nanum Gothic", "underline": false, "italic": false, "color": "#000000",
+             "role": "table|text"}],
+  "borders": {"h": [...], "v": [...]},  // 페이지 격자 전체 기준. 표 밖은 NONE
+  "images": [{"r", "c", "dx_px", "dy_px", "w_px", "h_px", "png_b64"}],  // 격자 위 떠 있는 이미지(서명 등)
+  "flags": [...]
+}
+```
+- 공용 조립기 `sheetparser/layout.py`:
+  `build_page_spec(page_mm, table, blocks, images, source) -> dict`
+  - table: {"x_mm": [...경계], "y_mm": [...경계], "cells": [{"r","c","rs","cs", 서식/텍스트 필드}], "borders": {"h","v"}}  (v1 표 격자를 mm 경계로 표현한 것)
+  - blocks: 표 밖 텍스트 [{"bbox_mm": [x0,y0,x1,y1], "text", "size_pt", "bold", "underline", "font", "h"}]
+  - images: [{"bbox_mm": [...], "png_b64"}]
+  - 표 경계 + 블록 경계 + 여백으로 페이지 격자를 만들고, 1mm 미만 틈은 표 선이 아닌 한 합쳐 얇은 열/행을 만들지 않는다. 블록은 bbox를 덮는 칸을 병합해 넣고 정렬로 위치를 맞춘다.
+- v1 TableSpec(표만)도 계속 업로드 가능해야 한다 (하위 호환).
+
+## v2 성공 기준
+PDF 3개 (data/pdfs/*.pdf, 텍스트 레이어 있음):
+- 텍스트 100% 일치 (표 안팎 모두), 표 선 위치 오차 중앙값 ≤0.3mm, 최대 ≤1mm
+- 표 밖 텍스트 블록 중심 위치 오차 ≤2mm, 글자 크기 ±1pt
+- 회색 머리글 배경, 밑줄 제목, 서명 이미지 재현
+사진 7장 (data/photos):
+- 근무일정표 4장 셀 내용: data/photos/gt_content.json 대비 셀 정확도 ≥99% (예전 전체 이미지 1회 호출 방식이 250/250)
+- 표 위/아래 텍스트 줄 포함, 배경색 오인식 0건, 한 열 안 글자 크기 일관
+- 장당 처리 ≤60초
+공통: 합성 회귀(v1 기준) 유지

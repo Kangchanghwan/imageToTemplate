@@ -20,7 +20,7 @@ def _png(img):
 def read_cells(crop, n, bgr=(255, 255, 255)):
     """크롭 안의 글자 칸 n개를 왼쪽→오른쪽 순서로 읽어 문자열 n개 반환."""
     h, w = crop.shape[:2]
-    ph, pw = max(0, 140 - h), max(0, 140 - w)
+    ph, pw = max(0, 64 - h, int(w / 4) - h), max(0, 64 - w, int(h / 4) - w)  # vlm 크래시 방지: 4:1 이내, 짧은 변 64px 이상 (패딩만)
     if ph or pw:
         crop = cv2.copyMakeBorder(crop, ph // 2 + 8, ph - ph // 2 + 8, pw // 2 + 8, pw - pw // 2 + 8,
                                   cv2.BORDER_CONSTANT, value=[int(v) for v in bgr])
@@ -52,9 +52,9 @@ def fill_text(img, cells, ys, xs, px_per_mm_img=10):
     rows = {}
     singles = []
     for c in todo:
-        (rows.setdefault(c["r"], []) if c["rs"] == 1 else singles).append(c)
+        singles.append(c)  # 셀 단위 호출 (행 단위는 가로 비율이 커서 vlm 크래시 유발)
     units = []
-    for r, cs in rows.items():
+    for r, cs in []:
         cs.sort(key=lambda c: c["c"])
         x0 = min(c["_rect"][0] for c in cs); x1 = max(c["_rect"][2] for c in cs)
         y0 = min(c["_rect"][1] for c in cs); y1 = max(c["_rect"][3] for c in cs)
@@ -65,7 +65,8 @@ def fill_text(img, cells, ys, xs, px_per_mm_img=10):
     for cs, (x0, y0, x1, y1) in units:
         x0, y0, x1, y1 = max(int(x0) - 2, 0), max(int(y0) - 2, 0), min(int(x1) + 2, W), min(int(y1) + 2, H)
         crop = img[y0:y1, x0:x1]
-        bgr = cs[0].get("_bgr") or (255, 255, 255)
+        bgr = cs[0].get("_bgr")
+        bgr = (255, 255, 255) if bgr is None else bgr
         res = read_cells(crop, len(cs), bgr)
         calls += 1
         if res is None or len(res) != len(cs):

@@ -66,6 +66,7 @@ def main():
     v.add_argument("--keep", action="store_true", help="시트를 지우지 않는다(기본도 유지)"); v.add_argument("--delete", action="store_true")
     cv = sub.add_parser("convert", help="입력(pdf/jpg/png) 자동 판별 -> 시트 -> 검증 요약")
     cv.add_argument("input"); cv.add_argument("-o", default=None); cv.add_argument("--title")
+    cv.add_argument("--verify", action="store_true", help="시트 PDF 내보내기 + 원본 겹쳐 채점 + 정답 채점 (기본은 업로드 후 URL만)")
     cv.add_argument("--keep", action="store_true", help="시트 유지 (기본 동작)"); cv.add_argument("--delete", action="store_true", help="검증 후 시트 삭제")
     a = ap.parse_args()
     if a.cmd == "run":
@@ -87,7 +88,7 @@ def main():
         print(json.dumps(upload.upload(json.load(open(a.spec)), a.title or os.path.basename(a.spec)), ensure_ascii=False))
     elif a.cmd == "convert":
         from . import convert
-        convert.convert(a.input, a.o, a.title, delete=a.delete and not a.keep)
+        convert.convert(a.input, a.o, a.title, delete=a.delete and not a.keep, verify_on=a.verify)
     elif a.cmd == "verify":
         from . import verify
         verify.main(a.spec, a.o, a.delete)

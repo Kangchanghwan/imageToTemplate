@@ -133,6 +133,7 @@ def _extend_left(grid, mask):
 def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
     """kind="pdf_scan": 입력이 이미 10px/mm 로 정규화된 용지 이미지이므로 원근 보정을 생략한다."""
     t0 = time.time()
+    OCR.stats_reset()
     if img0 is None:
         img0 = cv2.imread(path)
     if img0 is None:
@@ -222,7 +223,8 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
                 last = max(i for i, c in enumerate(rc) if not c["_empty"])
                 sub = rc[:last + 1]   # 마지막 잉크 칸까지만 잘라 보낸다 (이미지가 작아 빠름)
                 res = OCR.read_row(flat, (tb[0], grid["ys"][r], xs_mm[sub[-1]["c"] + sub[-1]["cs"]] * PPM, grid["ys"][r + 1]),
-                                   [xs_mm[c["c"] + c["cs"]] - xs_mm[c["c"]] for c in sub])
+                                   [xs_mm[c["c"] + c["cs"]] - xs_mm[c["c"]] for c in sub],
+                                   [i for i, c in enumerate(sub) if not c["_empty"]])
                 meta["calls"] += 1
                 if res and len(res) == len(sub):
                     for c, t in zip(sub, res):
@@ -243,7 +245,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
             if not sub:
                 mat = None
                 break
-            mat += sub
+            mat += sub[0]   # 어긋난 행(sub[1])은 칸이 비어 있어 아래 행 재질의가 다시 읽는다
         meta["chunks"] = len(chunks)
         if mat is None:
             cflags.append({"reason": "table_ocr_failed"})
@@ -270,7 +272,10 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
             for r in trig[:14]:
                 rc = rowcells(r)
                 bb = (tb[0], grid["ys"][r], tb[2], grid["ys"][r + 1])
-                res = OCR.read_row(flat, bb, [xs_mm[c["c"] + c["cs"]] - xs_mm[c["c"]] for c in rc])
+                want = [i for i, c in enumerate(rc) if not c["_empty"]]
+                if not want:
+                    continue
+                res = OCR.read_row(flat, bb, [xs_mm[c["c"] + c["cs"]] - xs_mm[c["c"]] for c in rc], want)
                 meta["calls"] += 1
                 meta["row_requery"] = meta.get("row_requery", 0) + 1
                 if res and len(res) == len(rc):
@@ -400,6 +405,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
     spec["flags"] = list(spec.get("flags", [])) + flags + cflags
     for e in grid["extras"]:
         spec["flags"].append({"reason": "extra_table_ignored", "bbox": [int(a / PPM * 10) for a in e]})
+    meta["vlm"] = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in OCR.STATS.items()}
     spec["meta"].update(meta)
     spec["meta"]["sec_total"] = round(time.time() - t0, 2)
     spec["meta"]["blocks"] = [{"text": b["text"], "bbox_mm": [round(v, 1) for v in b["bbox_mm"]], "size_pt": b["size_pt"]} for b in blocks]

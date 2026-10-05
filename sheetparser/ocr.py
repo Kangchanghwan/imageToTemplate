@@ -90,67 +90,103 @@ def _pad43(img, bgr=(255, 255, 255), minside=64):
     return cv2.copyMakeBorder(img, t, nh - h - t, l, nw - w - l, cv2.BORDER_CONSTANT, value=[int(v) for v in bgr])
 
 
-def _ask(img, prompt, schema, max_tokens, name="out"):
-    body = {"model": MODEL, "temperature": 0, "max_tokens": max_tokens,
+# ---- v2: 표 전체 1회 호출 ----
+# 호출 통계 (장당 합계: 호출 수, 프롬프트/생성 토큰, 초). photopage.run_page 가 시작할 때 reset 한다.
+STATS = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "sec": 0.0, "bad_rows": 0}
+
+
+def stats_reset():
+    STATS.update({"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "sec": 0.0, "bad_rows": 0})
+
+
+CELL = r"[^|\n]{0,80}"   # GBNF: 칸 내용 = '|' 와 줄바꿈이 없는 글자 0~80자
+
+
+def _gbnf(lines):
+    """lines: 줄마다 (고정 접두 문자열, 칸 수). 줄 수, 줄마다 구분자 개수, 행번호를 문법으로 강제한다."""
+    rules = []
+    for k, (prefix, n) in enumerate(lines):
+        body = ('"%s" ' % prefix if prefix else "") + ' "|" '.join(["cell"] * n)
+        rules.append("l%d ::= %s \"\\n\"" % (k, body))
+    root = "root ::= " + " ".join("l%d" % k for k in range(len(lines)))
+    return root + "\n" + "\n".join(rules) + "\ncell ::= " + CELL + "\n"
+
+
+def _ask(img, prompt, grammar, max_tokens):
+    """압축 출력(grammar 로 형식 강제). 반환: 응답 텍스트 또는 None. 사용량은 STATS 에 누적."""
+    body = {"model": MODEL, "temperature": 0, "max_tokens": max_tokens, "grammar": grammar,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64," + _png(img)}},
-                {"type": "text", "text": prompt}]}],
-            "response_format": {"type": "json_schema", "json_schema": {"name": name, "schema": schema}}}
+                {"type": "text", "text": prompt}]}]}
     req = urllib.request.Request(URL, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     for k in range(3):  # vlm 이 재시작 중일 수 있어 간격을 두고 재시도 (서버는 건드리지 않는다)
         try:
+            t0 = time.time()
             r = json.load(urllib.request.urlopen(req, timeout=300))
-            return json.loads(r["choices"][0]["message"]["content"])
+            u = r.get("usage", {})
+            STATS["calls"] += 1
+            STATS["prompt_tokens"] += u.get("prompt_tokens", 0)
+            STATS["completion_tokens"] += u.get("completion_tokens", 0)
+            STATS["sec"] += time.time() - t0
+            return r["choices"][0]["message"]["content"]
         except Exception:
             time.sleep(20)
     return None
 
 
+def _lines(txt):
+    return None if txt is None else txt.rstrip("\n").split("\n")
+
+
 def read_table(img, bbox, R, C, col_w, merges, header_rows=1, ink=None, part=None):
-    """보정된 표 이미지 전체를 1회 보내 R x C 배열을 받는다. 반환 R x C 문자열 리스트 또는 None.
-    bbox=(x0,y0,x1,y1) px, col_w=열 너비 비율 리스트, merges=[(r,c,rs,cs)] (0 기준)"""
+    """보정된 표 이미지를 1회 보내 R x C 배열을 받는다. ink=[(r,c)] 잉크 있는 칸(0 기준)만 요청하고 완전히 빈 행은 요청하지 않는다.
+    출력은 한 줄에 한 행 `행번호|칸|칸..` (요청 칸 순서). 반환 (R x C 문자열 리스트, 어긋난 행 집합) 또는 None."""
     H, W = img.shape[:2]
     m = 12
     x0, y0, x1, y1 = bbox
     crop = _pad43(img[max(int(y0) - m, 0):min(int(y1) + m, H), max(int(x0) - m, 0):min(int(x1) + m, W)])
     tot = float(sum(col_w))
-    ratio = ", ".join("%d%%" % round(100 * w / tot) for w in col_w)
-    mtxt = ""
-    if merges:
-        mtxt = " 병합된 칸: " + "; ".join("%d행%d열부터 %d행x%d열 크기" % (r + 1, c + 1, rs, cs) for r, c, rs, cs in merges) + "."
-    extra = ""
-    if part:
-        extra += " 이 이미지는 더 큰 표의 일부(전체 %d행 중 %d행~%d행)이고 아래 행 번호는 이 이미지 기준이다." % part
-    if ink is not None:
-        extra += " 글자가 있는 칸(행,열)은 다음과 같다: %s. 다른 칸에 글자가 없으면 \"\" 로 둔다." % (
-            ", ".join("(%d,%d)" % (r + 1, c + 1) for r, c in ink) if ink else "없음")
-    prompt = ("사진으로 찍은 표 이미지다.%s 표는 정확히 %d행 x %d열이고 첫 %d행은 머리글이다. 열 너비 비율은 왼쪽부터 %s 이다.%s "
-              "모든 칸의 글자를 위에서 아래, 왼쪽에서 오른쪽 순서로 cells[행][열] 이차원 배열에 보이는 그대로 적어라. "
-              "빈 칸은 \"\" 로 둔다. 병합된 칸은 왼쪽 위 칸에만 쓰고 나머지 칸은 \"\" 로 둔다. "
-              "한 칸 안에서 줄이 바뀌면 \\n 으로 잇는다. 종이 뒷면이 비쳐 흐릿하게 보이는 글자와 표 바깥 글자는 무시한다. "
-              "JSON {\"cells\": [[...], ...]} 로만 답한다." % (extra, R, C, header_rows, ratio, mtxt))
-    schema = {"type": "object", "properties": {"cells": {"type": "array", "minItems": R, "maxItems": R, "items": {
-        "type": "array", "minItems": C, "maxItems": C, "items": {"type": "string"}}}}, "required": ["cells"]}
-    o = _ask(crop, prompt, schema, 300 + 40 * R * C, "grid")
-    if not o:
+    ratio = ",".join("%d" % round(100 * w / tot) for w in col_w)
+    if ink is None:
+        ink = [(r, c) for r in range(R) for c in range(C)]
+    byrow = {}
+    for r, c in sorted(ink):
+        byrow.setdefault(r, []).append(c)
+    rows = sorted(byrow)
+    mat = [[""] * C for _ in range(R)]
+    if not rows:
+        return mat, set()
+    want = "\n".join("%d: %s" % (r + 1, ",".join(str(c + 1) for c in byrow[r])) for r in rows)
+    ptxt = " 큰 표의 일부(전체 %d행 중 %d~%d행), 행 번호는 이 이미지 기준." % part if part else ""
+    prompt = ("표 사진이다.%s %d행 x %d열, 열 너비 비율(%%) %s. 아래는 '행번호: 글자가 있는 열번호' 목록이다.\n%s\n"
+              "각 행을 한 줄로, `행번호|글자|글자` 형식으로 목록의 열 순서대로 보이는 그대로 적어라. 칸 안에서 줄이 바뀌면 공백 하나로 잇는다. "
+              "병합된 칸은 목록의 열 하나에 해당한다. 비쳐 보이는 뒷면 글자와 표 바깥 글자는 무시한다." % (ptxt, R, C, ratio, want))
+    gram = _gbnf([("%d|" % (r + 1), len(byrow[r])) for r in rows])
+    txt = _ask(crop, prompt, gram, 200 + 25 * len(ink))
+    ls = _lines(txt)
+    if ls is None:
         return None
-    return [[str(s).replace("\\n", "\n") for s in row] for row in o["cells"]]
+    bad = set()
+    for k, r in enumerate(rows):
+        parts = ls[k].split("|") if k < len(ls) else []
+        if len(parts) != len(byrow[r]) + 1 or parts[0] != str(r + 1):   # 문법이 막아 주지만 방어: 개수가 안 맞으면 그 행만 재질의
+            bad.add(r)
+            STATS["bad_rows"] += 1
+            continue
+        for c, t in zip(byrow[r], parts[1:]):
+            mat[r][c] = t.strip()
+    return mat, bad
 
 
 def read_neighbors(img, rects, target):
-    """이웃 칸을 포함한 크롭 재질의. rects: 가로로 이어진 칸 사각형 목록(px), target: 읽을 칸 인덱스."""
+    """이웃 칸을 포함한 크롭 재질의. rects: 가로로 이어진 칸 사각형 목록(px), target: 읽을 칸 인덱스. 대상 칸 글자만 한 줄로 받는다."""
     H, W = img.shape[:2]
     x0 = max(int(min(r[0] for r in rects)) - 2, 0); x1 = min(int(max(r[2] for r in rects)) + 2, W)
     y0 = max(int(min(r[1] for r in rects)) - 2, 0); y1 = min(int(max(r[3] for r in rects)) + 2, H)
     n = len(rects)
-    prompt = ("표의 한 줄을 잘라낸 이미지다. 가로로 칸이 정확히 %d개 있다. 왼쪽부터 각 칸의 글자를 보이는 그대로 적어라. "
-              "빈 칸은 \"\". 흐릿하게 비친 뒷면 글자는 무시한다. JSON {\"cells\": [...]} 로만 답한다." % n)
-    schema = {"type": "object", "properties": {"cells": {"type": "array", "minItems": n, "maxItems": n,
-                                                          "items": {"type": "string"}}}, "required": ["cells"]}
-    o = _ask(_pad43(img[y0:y1, x0:x1]), prompt, schema, 80 + 60 * n, "nb")
-    if not o:
-        return None
-    return str(o["cells"][target]).replace("\\n", "\n")
+    prompt = "표의 한 줄을 잘라낸 이미지다. 가로로 칸이 %d개 있다. 왼쪽에서 %d번째 칸의 글자만 보이는 그대로 한 줄로 적어라. 글자가 없으면 빈 줄. 비친 뒷면 글자는 무시한다." % (n, target + 1)
+    txt = _ask(_pad43(img[y0:y1, x0:x1]), prompt, _gbnf([("", 1)]), 120)
+    return None if txt is None else txt.strip("\n").strip()
 
 
 def read_line(img, bbox):
@@ -160,28 +196,31 @@ def read_line(img, bbox):
     x0, y0, x1, y1 = bbox
     mx, my = 70, 30
     crop = _pad43(img[max(int(y0) - my, 0):min(int(y1) + my, H), max(int(x0) - mx, 0):min(int(x1) + mx, W)])
-    prompt = ("이미지 가운데 한 줄의 글자가 있다(주변에 다른 선이나 물체가 보일 수 있다). 가운데 줄의 글자만 보이는 그대로 받아 적어라. "
-              "클립 같은 물체가 글자 위를 지나가도, 일부 획이 보이는 글자는 읽는다. 전혀 보이지 않는 글자는 지어내지 않는다. "
-              "괄호 안 빈칸은 공백으로 둔다. 글자가 없으면 \"\". JSON {\"text\": \"...\"} 로만 답한다.")
-    schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
-    o = _ask(crop, prompt, schema, 200, "line")
-    return None if not o else str(o["text"])
+    prompt = ("이미지 가운데 한 줄의 글자만 보이는 그대로 한 줄로 적어라(주변 선이나 물체는 무시). 클립 같은 물체가 글자 위를 지나가도 "
+              "일부 획이 보이면 읽고, 전혀 안 보이는 글자는 지어내지 않는다. 괄호 안 빈칸은 공백. 글자가 없으면 빈 줄.")
+    txt = _ask(crop, prompt, _gbnf([("", 1)]), 120)
+    return None if txt is None else txt.strip("\n")
 
 
-def read_row(img, bbox, widths):
-    """표 한 행 크롭을 보내 칸 n개를 읽는다. widths: 칸 너비(상대값)."""
+def read_row(img, bbox, widths, want=None):
+    """표 한 행 크롭에서 칸을 읽는다. widths: 칸 너비(상대값), want: 글자가 있는 칸 인덱스(0 기준, 기본 전부).
+    출력은 `글자|글자` 한 줄. 반환: len(widths) 리스트(요청 안 한 칸은 "")."""
     H, W = img.shape[:2]
     x0, y0, x1, y1 = bbox
     crop = _pad43(img[max(int(y0) - 3, 0):min(int(y1) + 3, H), max(int(x0) - 8, 0):min(int(x1) + 8, W)])
     n = len(widths)
+    if want is None:
+        want = list(range(n))
     tot = float(sum(widths))
-    ratio = ", ".join("%d%%" % round(100 * w / tot) for w in widths)
-    prompt = ("표의 한 행을 잘라낸 이미지다. 이 행에는 칸이 정확히 %d개 있고 너비 비율은 왼쪽부터 %s 이다. "
-              "왼쪽부터 각 칸의 글자를 보이는 그대로 적어라. 빈 칸은 \"\". 한 칸 안에서 줄이 바뀌면 \\n 으로 잇는다. "
-              "흐릿하게 비친 뒷면 글자는 무시한다. JSON {\"cells\": [...]} 로만 답한다." % (n, ratio))
-    schema = {"type": "object", "properties": {"cells": {"type": "array", "minItems": n, "maxItems": n,
-                                                          "items": {"type": "string"}}}, "required": ["cells"]}
-    o = _ask(crop, prompt, schema, 100 + 60 * n, "row")
-    if not o:
+    ratio = ",".join("%d" % round(100 * w / tot) for w in widths)
+    prompt = ("표의 한 행 이미지다. 칸 %d개, 너비 비율(%%) %s. 글자가 있는 칸은 왼쪽에서 %s번째다. "
+              "그 칸들의 글자만 왼쪽부터 `글자|글자` 형식 한 줄로 적어라. 칸 안 줄바꿈은 공백 하나. 비친 뒷면 글자는 무시한다."
+              % (n, ratio, ",".join(str(i + 1) for i in want)))
+    txt = _ask(crop, prompt, _gbnf([("", len(want))]), 60 + 25 * len(want))
+    ls = _lines(txt)
+    if not ls or len(ls[0].split("|")) != len(want):
         return None
-    return [str(s).replace("\\n", "\n") for s in o["cells"]]
+    out = [""] * n
+    for i, t in zip(want, ls[0].split("|")):
+        out[i] = t.strip()
+    return out

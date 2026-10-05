@@ -37,10 +37,13 @@ tools/dk.sh tools/cleanup.py --keep-prefix v3_   # sheetparser-poc 폴더에서 
 `.env` (git 제외)에 `SHEETS_WEBAPP_URL`, `SHEETS_WEBAPP_KEY`가 필요하다. Apps Script는 `apps_script/Code.gs`를 붙여 웹 앱으로 배포한다(실행 계정 본인, 접근 모든 사용자). 서비스는 Sheets(v4) 고급 서비스를 켠다.
 
 ```sh
-python -m sheetparser convert <input.pdf|jpg|png> [-o runs/convert/<name>] [--title T] [--keep|--delete]
+python -m sheetparser convert <input.pdf|jpg|png> [-o runs/convert/<name>] [--title T] [--verify] [--keep|--delete]
+python tools/accuracy.py photo <spec.json> <name>      # 검증 없이 만든 spec 의 정답 채점(오프라인)
 ```
 
-입력 종류는 자동 판별한다. 결과로 URL과 지표 요약을 출력하고 `-o` 폴더에 PageSpec JSON, 시트 PDF, 나란히 PNG(`*_side.png`, 사진/스캔은 페이지 전체 `*_page_side.png`), `convert.json`을 저장한다. 시트는 기본으로 남기고 `--delete`를 주면 검증 후 지운다. 이전 서브명령 `run / upload / verify / score / synth / bench`도 그대로 쓸 수 있다.
+입력 종류는 자동 판별한다. 기본 동작은 스펙 생성 -> 시트 업로드(create 1회) -> URL과 소요 시간/vlm 사용량(호출 수, 토큰) 출력이다. `-o` 폴더에 PageSpec JSON과 `convert.json`을 저장한다. `--verify`를 주면 시트를 A4 PDF로 내보내 원본과 겹쳐 채점하고(시트 PDF, 나란히 PNG `*_side.png` 저장) 사진은 정답(`gt_content.json`) 채점도 한다. 시트는 기본으로 남기고 `--delete`를 주면 끝에 지운다(검증 안 해도 동작). 이전 서브명령 `run / upload / verify / score / synth / bench`도 그대로 쓸 수 있다.
+
+vlm 호출은 llama.cpp `grammar`(GBNF)로 형식을 강제한 압축 텍스트(`행번호|칸|칸`, 한 줄에 한 행)를 쓰고, CV가 잉크 있다고 본 칸만 요청한다. 속도 측정은 `tools/run_r4.sh`.
 
 ## 단위 규칙과 실측 보정값
 
@@ -55,7 +58,7 @@ python -m sheetparser convert <input.pdf|jpg|png> [-o runs/convert/<name>] [--ti
 
 ## 한계
 
-- 사진 경로는 vlm 호출이 필요하다(장당 30~70초). 스캔 PDF는 큰 이미지라 더 걸린다(약 100초).
+- 사진 경로는 vlm 호출이 필요하다(장당 20~55초). 스캔 PDF는 큰 이미지라 더 걸린다(약 60초).
 - pdf_scan/photo는 서명 같은 떠 있는 이미지를 시트에 재현하지 않는다(PDF 벡터만 재현). 서명 줄은 글자만 남는다.
 - 사진/스캔의 굵기 판정은 잉크 두께 기반이라 저해상도에서 머리글 굵기를 놓치거나 숫자 열을 굵게 오판할 수 있다. 제목은 "표 가운데의 본문보다 1.2배 이상 큰 글줄은 굵게" 규칙을 쓴다.
 - 시트 쪽 글꼴(Calibri/Nanum Gothic 대체)이 원본(굴림 등)과 달라 글줄 폭이 조금 다르다. 좁은 열의 머리글은 한글이 줄바꿈될 수 있다.

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "source": {"path": "synthetic", "kind": "pdf_vector", "page": 0},
+  "page_mm": [210, 297],
+  "origin_mm": [10, 10],
+  "columns": [60, 120, 200, 90],
+  "rows": [21, 40, 60, 21],
+  "cells": [
+    {"r": 0, "c": 0, "rs": 1, "cs": 4, "text": "근무일정표 (2026년 10월)", "h": "CENTER", "v": "MIDDLE", "size_pt": 14, "bold": true, "bg": "#d9e2f3", "wrap": false},
+    {"r": 1, "c": 0, "rs": 2, "cs": 1, "text": "구분", "h": "CENTER", "v": "MIDDLE", "size_pt": 10, "bold": true, "bg": "#f2f2f2", "wrap": false},
+    {"r": 1, "c": 1, "text": "월요일", "h": "LEFT", "v": "TOP", "size_pt": 10, "bold": false, "bg": "#ffffff", "wrap": true},
+    {"r": 1, "c": 2, "text": "화요일 오전 9시부터 오후 2시 30분까지", "h": "CENTER", "v": "MIDDLE", "size_pt": 9, "bold": false, "bg": "#fff2cc", "wrap": true},
+    {"r": 1, "c": 3, "text": "123", "h": "RIGHT", "v": "BOTTOM", "size_pt": 10, "bold": true, "bg": "#ffffff", "wrap": false},
+    {"r": 2, "c": 1, "rs": 1, "cs": 2, "text": "진산중학교 디지털튜터", "h": "CENTER", "v": "MIDDLE", "size_pt": 11, "bold": false, "bg": "#e2efd9", "wrap": true},
+    {"r": 2, "c": 3, "text": "0012", "h": "RIGHT", "v": "TOP", "size_pt": 10, "bold": false, "bg": "#ffffff", "wrap": false},
+    {"r": 3, "c": 0, "text": "비고", "h": "CENTER", "v": "MIDDLE", "size_pt": 9, "bold": false, "bg": "#ffffff", "wrap": false},
+    {"r": 3, "c": 1, "rs": 1, "cs": 3, "text": "점선 없음, 굵은 외곽선", "h": "LEFT", "v": "MIDDLE", "size_pt": 9, "bold": false, "bg": "#ffffff", "wrap": false}
+  ],
+  "borders": {
+    "h": [
+      ["SOLID_THICK", "SOLID_THICK", "SOLID_THICK", "SOLID_THICK"],
+      ["DOUBLE", "DOUBLE", "DOUBLE", "DOUBLE"],
+      ["SOLID", "SOLID", "SOLID", "SOLID"],
+      ["SOLID_MEDIUM", "SOLID_MEDIUM", "SOLID_MEDIUM", "SOLID_MEDIUM"],
+      ["SOLID_THICK", "SOLID_THICK", "SOLID_THICK", "SOLID_THICK"]
+    ],
+    "v": [
+      ["SOLID_THICK", "NONE", "NONE", "NONE", "SOLID_THICK"],
+      ["SOLID_THICK", "SOLID", "SOLID", "SOLID_MEDIUM", "SOLID_THICK"],
+      ["SOLID_THICK", "SOLID", "NONE", "SOLID_MEDIUM", "SOLID_THICK"],
+      ["SOLID_THICK", "SOLID", "NONE", "NONE", "SOLID_THICK"]
+    ]
+  },
+  "flags": []
+}

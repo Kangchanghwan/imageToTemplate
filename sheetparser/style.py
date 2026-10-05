@@ -43,6 +43,9 @@ def analyze(img, gray, rect, inset=7):
     g = gray[y0:y1, x0:x1]
     crop = img[y0:y1, x0:x1]
     med = float(np.median(g))
+    res["med"] = med
+    gf = g.astype(np.float32)
+    res["uni"] = float(((np.abs(gf - med) <= 12) | (gf < med - 40)).mean())
     near = np.abs(g.astype(np.float32) - med) <= 20
     if near.sum() > 10:
         res["bgr"] = np.median(crop[near], axis=0)
@@ -66,7 +69,7 @@ def analyze(img, gray, rect, inset=7):
     gl, gr = xs.min(), cw - 1 - xs.max()
     gt, gb = ys.min(), ch - 1 - ys.max()
     d = gr - gl
-    res["h"] = "CENTER" if abs(d) < 0.12 * cw else ("LEFT" if d > 0 else "RIGHT")
+    res["h"] = "CENTER" if abs(d) < 0.24 * cw else ("LEFT" if d > 0 else "RIGHT")
     d = gb - gt
     res["v"] = "MIDDLE" if abs(d) < 0.12 * ch else ("TOP" if d > 0 else "BOTTOM")
     rows = keep.any(1)
@@ -80,5 +83,36 @@ def analyze(img, gray, rect, inset=7):
     stroke = 2.0 * keep.sum() / per if per else 0
     res["bold"] = bool(lh and stroke / lh > 0.135)
     res["stroke_ratio"] = float(stroke / lh) if lh else 0
+    res["ink_h"] = int(ys.max() - ys.min() + 1)
     res["ink_bbox"] = [int(xs.min() + x0), int(ys.min() + y0), int(xs.max() + x0), int(ys.max() + y0)]
     return res
+
+
+HANGUL_RATIO, LATIN_RATIO, LEAD = 0.88, 0.72, 1.2
+
+
+def size_from_ink(ink_h_px, text, ppm=PPM):
+    """잉크 bbox 높이(px)와 글 내용(줄 수, 한글 포함 여부)으로 글자 크기(pt) 추정."""
+    n = max(1, len((text or "").strip("\n").split("\n")))
+    hangul = any("\uac00" <= ch <= "\ud7a3" for ch in text or "")
+    ratio = HANGUL_RATIO if hangul else LATIN_RATIO
+    em_mm = ink_h_px / ppm / (ratio + LEAD * (n - 1))
+    return em_mm * 72 / 25.4
+
+
+def unify_sizes(items, rel=0.12):
+    """items: [{'size','col','row_kind'}] 형태가 아니라 호출부에서 열/행 최빈값을 적용한 뒤,
+    페이지 전체 크기 단계 클러스터링: 정렬 후 인접 값이 rel 이내면 한 단계로 묶고 중앙값(0.5pt 반올림)을 쓴다."""
+    vals = sorted(set(items))
+    groups = []
+    for v in vals:
+        if groups and v <= groups[-1][-1] * (1 + rel):
+            groups[-1].append(v)
+        else:
+            groups.append([v])
+    m = {}
+    for g in groups:
+        c = round(float(np.median(g)) * 2) / 2
+        for v in g:
+            m[v] = c
+    return m

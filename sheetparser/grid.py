@@ -156,3 +156,39 @@ def build_grid(mask, ppm, min_len_mm=2.5):
         "xs": [x + v for v in xcen], "ys": [y + v for v in ycen],
         "h": hs, "v": vs, "cells": cells, "extras": extras, "ppm": ppm,
     }
+
+
+def trim_outer(grid, row_k=2.2, col_k=4.0):
+    """표 가장자리의 비정상적으로 큰 행/열(배경 화면, 비친 선 등)을 잘라낸다. 반환 (grid, 제거수 dict)"""
+    removed = {"top": 0, "bottom": 0, "left": 0, "right": 0}
+    while True:
+        ys, xs = grid["ys"], grid["xs"]
+        hs = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+        ws = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
+        if len(hs) < 4 or len(ws) < 2:
+            break
+        mh, mw = float(np.median(hs)), float(np.median(ws))
+        side = None
+        if hs[0] > row_k * mh: side = "top"
+        elif hs[-1] > row_k * mh: side = "bottom"
+        elif len(ws) > 3 and ws[0] > col_k * mw: side = "left"
+        elif len(ws) > 3 and ws[-1] > col_k * mw: side = "right"
+        if side is None:
+            break
+        R, C = len(hs), len(ws)
+        r0, r1, c0, c1 = 0, R, 0, C
+        if side == "top": r0 = 1
+        if side == "bottom": r1 = R - 1
+        if side == "left": c0 = 1
+        if side == "right": c1 = C - 1
+        cells = []
+        for (r, c, rs, cs) in grid["cells"]:
+            if r >= r0 and c >= c0 and r + rs <= r1 and c + cs <= c1:
+                cells.append((r - r0, c - c0, rs, cs))
+        grid = dict(grid)
+        grid["xs"], grid["ys"] = xs[c0:c1 + 1], ys[r0:r1 + 1]
+        grid["h"] = [row[c0:c1] for row in grid["h"][r0:r1 + 1]]
+        grid["v"] = [row[c0:c1 + 1] for row in grid["v"][r0:r1]]
+        grid["cells"] = sorted(cells)
+        removed[side] += 1
+    return grid, removed

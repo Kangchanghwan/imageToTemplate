@@ -87,7 +87,7 @@ def line_mask(img, ppm=PPM):
     return mask
 
 
-def table_rectify(img):
+def table_rectify(img, keep_frame=False):
     """용지 외곽을 못 쓸 때: 가장 큰 선 덩어리(표)의 외곽 4점을 직사각형으로 편다.
     img는 이미 폭 2100px(=210mm 가정)로 스케일된 상태. 반환 (img2, origin_mm, ok)"""
     m = line_mask(img)
@@ -111,8 +111,52 @@ def table_rectify(img):
     quad = _order(quad)
     W = int((np.linalg.norm(quad[1] - quad[0]) + np.linalg.norm(quad[2] - quad[3])) / 2)
     H = int((np.linalg.norm(quad[3] - quad[0]) + np.linalg.norm(quad[2] - quad[1])) / 2)
+    if keep_frame:  # 페이지 좌표 유지: 표 왼쪽 위 모서리를 원래 위치에 두고 캔버스는 원본 프레임 크기
+        x0, y0 = float(quad[0][0]), float(quad[0][1])
+        dst = np.array([[x0, y0], [x0 + W, y0], [x0 + W, y0 + H], [x0, y0 + H]], np.float32)
+        M = cv2.getPerspectiveTransform(quad, dst)
+        out = cv2.warpPerspective(img, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+        return out, [0.0, 0.0], True
     pad = 60
     dst = np.array([[pad, pad], [pad + W, pad], [pad + W, pad + H], [pad, pad + H]], np.float32)
     M = cv2.getPerspectiveTransform(quad, dst)
     out = cv2.warpPerspective(img, M, (W + 2 * pad, H + 2 * pad), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
     return out, [round(float(quad[0][0]) / PPM, 1), round(float(quad[0][1]) / PPM, 1)], True
+
+
+def flatten(img, region_px, ppm=PPM, bs=8):
+    """조명 평탄화: 1px/mm 로 줄여 bs mm 블록의 90% 밝기를 3차 다항식으로 강건 적합(어두운 칸은 이상치로 제외)하고 나눈다.
+    region_px=(x0,y0,x1,y1) 적합 영역. 영역 밖은 가장자리 값으로 연장. 반환 평탄화된 BGR."""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    H, W = g.shape
+    small = cv2.resize(g, (W // ppm, H // ppm), interpolation=cv2.INTER_AREA).astype(np.float32)
+    h, w = small.shape
+    ny, nx = h // bs, w // bs
+    bl = small[:ny * bs, :nx * bs].reshape(ny, bs, nx, bs).transpose(0, 2, 1, 3).reshape(ny, nx, -1)
+    p = np.percentile(bl, 90, axis=2)
+    cy, cx = (np.arange(ny) + .5) * bs, (np.arange(nx) + .5) * bs
+    X, Y = np.meshgrid(cx, cy)
+    rx0, ry0, rx1, ry1 = [v / ppm for v in region_px]
+    sel = (X > rx0 - 10) & (X < rx1 + 10) & (Y > ry0 - 10) & (Y < ry1 + 10)
+    if sel.sum() < 20:
+        sel = np.ones_like(sel)
+
+    def terms(x, y):
+        u, v = x / w, y / h
+        return np.stack([u ** i * v ** j for i in range(4) for j in range(4 - i)], -1)
+    xs, ys, vals = X[sel], Y[sel], p[sel]
+    keep = np.ones(len(vals), bool)
+    for _ in range(6):
+        A = terms(xs[keep], ys[keep])
+        co = np.linalg.lstsq(A, vals[keep], rcond=None)[0]
+        res = vals - terms(xs, ys) @ co
+        keep = res > -8
+        if keep.sum() < 15:
+            break
+    gx = np.clip(np.arange(w) + .5, max(rx0, 0), min(rx1, w))
+    gy = np.clip(np.arange(h) + .5, max(ry0, 0), min(ry1, h))
+    GX, GY = np.meshgrid(gx, gy)
+    surf = (terms(GX, GY) @ co).astype(np.float32)
+    surf = cv2.resize(surf, (W, H), interpolation=cv2.INTER_LINEAR)
+    gain = np.clip(255.0 / np.maximum(surf, 1), 0.8, 2.2)
+    return np.clip(img.astype(np.float32) * gain[..., None], 0, 255).astype(np.uint8)

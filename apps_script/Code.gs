@@ -13,6 +13,7 @@ function doPost(e) {
     if (body.action === 'create') return out_(create_(body.spec, body.title));
     if (body.action === 'pdf') return out_(pdf_(body));
     if (body.action === 'delete') return out_(delete_(body.id));
+    if (body.action === 'list') return out_(list_());
     return out_({ok: false, error: 'unknown action'});
   } catch (err) {
     return out_({ok: false, error: String(err), stack: err && err.stack});
@@ -166,4 +167,15 @@ function pdf_(p) {
 function delete_(id) {
   DriveApp.getFileById(id).setTrashed(true);
   return {ok: true};
+}
+
+// sheetparser-poc 폴더의 파일 목록 (id, 이름, 생성시각). 고아/디버그 시트 정리용.
+function list_() {
+  var it = folder_().getFiles(), files = [];
+  while (it.hasNext()) {
+    var f = it.next();
+    files.push({id: f.getId(), name: f.getName(), created: f.getDateCreated().toISOString(), url: f.getUrl()});
+  }
+  files.sort(function (a, b) { return a.created < b.created ? -1 : 1; });
+  return {ok: true, count: files.length, files: files};
 }

@@ -64,6 +64,9 @@ def main():
     u = sub.add_parser("upload"); u.add_argument("spec"); u.add_argument("--title")
     v = sub.add_parser("verify"); v.add_argument("spec"); v.add_argument("-o", default="runs/verify")
     v.add_argument("--keep", action="store_true", help="시트를 지우지 않는다(기본도 유지)"); v.add_argument("--delete", action="store_true")
+    cv = sub.add_parser("convert", help="입력(pdf/jpg/png) 자동 판별 -> 시트 -> 검증 요약")
+    cv.add_argument("input"); cv.add_argument("-o", default=None); cv.add_argument("--title")
+    cv.add_argument("--keep", action="store_true", help="시트 유지 (기본 동작)"); cv.add_argument("--delete", action="store_true", help="검증 후 시트 삭제")
     a = ap.parse_args()
     if a.cmd == "run":
         from . import pipeline
@@ -82,6 +85,9 @@ def main():
     elif a.cmd == "upload":
         from . import upload
         print(json.dumps(upload.upload(json.load(open(a.spec)), a.title or os.path.basename(a.spec)), ensure_ascii=False))
+    elif a.cmd == "convert":
+        from . import convert
+        convert.convert(a.input, a.o, a.title, delete=a.delete and not a.keep)
     elif a.cmd == "verify":
         from . import verify
         verify.main(a.spec, a.o, a.delete)

@@ -45,8 +45,70 @@ def _px(bounds_mm, total_px):
     return cum
 
 
+SHEET_PT_SCALE = 0.975
+LINE_FACTOR = 1.3     # 시트 글줄이 차지하는 높이 = 글자 크기(px) x 1.3 (이보다 행이 낮으면 윗부분이 잘린다)
+
+
+def pad_blocks(blocks, table, page_mm):
+    """표 밖 블록의 행 높이가 시트 글줄 높이보다 낮으면 위/아래 빈 공간으로 같은 만큼 넓힌다(가운데 유지).
+    표 선, 다른 블록(가로로 겹치는 것)과 겹치지 않게 제한한다. 글자 위치는 세로 가운데 정렬이므로 변하지 않는다."""
+    H = page_mm[1]
+    tb = (table["x_mm"][0], table["y_mm"][0], table["x_mm"][-1], table["y_mm"][-1]) if table else None
+    orig = [list(b["bbox_mm"]) for b in blocks]
+    out = []
+    for k, b in enumerate(blocks):
+        x0, y0, x1, y1 = orig[k]
+        sp = max(1, int(b.get("size_pt", 10) / SHEET_PT_SCALE + 0.5))
+        need = sp * 96 / 72 * LINE_FACTOR / PX_MM
+        h = y1 - y0
+        # 가로: 병합된 칸은 넘친 글자를 자르므로 시트 글꼴(굵게일수록 넓음)이 더 넓어도 들어가게 정렬 방향으로 여유를 둔다
+        w = x1 - x0
+        ex = (0.14 if b.get("bold") else 0.07) * w + 1.0
+        al = b.get("h", "LEFT")
+        nx0 = x0 - (ex / 2 if al == "CENTER" else ex if al == "RIGHT" else 0)
+        nx1 = x1 + (ex / 2 if al == "CENTER" else ex if al == "LEFT" else 0)
+        W = page_mm[0]
+        nx0, nx1 = max(nx0, 1.0), min(nx1, W - 1.0)
+        for j, o in enumerate(orig):
+            if j == k or o[3] <= y0 or o[1] >= y1:
+                continue
+            if o[0] >= x1 - 0.1:
+                nx1 = min(nx1, o[0] - 0.3)
+            elif o[2] <= x0 + 0.1:
+                nx0 = max(nx0, o[2] + 0.3)
+        nx0, nx1 = min(nx0, x0), max(nx1, x1)
+        if h >= need:
+            d = dict(b); d["bbox_mm"] = [nx0, y0, nx1, y1]
+            out.append(d); continue
+        lo, hi = 0.0, H
+        if tb and x1 > tb[0] and x0 < tb[2]:
+            if y1 <= tb[1] + 0.6:
+                hi = tb[1] - 0.3
+            elif y0 >= tb[3] - 0.6:
+                lo = tb[3] + 0.3
+        for j, o in enumerate(orig):
+            if j == k or o[2] <= x0 or o[0] >= x1:
+                continue
+            oc, c = (o[1] + o[3]) / 2, (y0 + y1) / 2
+            if oc < c:
+                lo = max(lo, (o[3] + y0) / 2)
+            else:
+                hi = min(hi, (y1 + o[1]) / 2)
+        g = (need - h) / 2
+        a, bb = y0 - g, y1 + g
+        if bb > hi:
+            a -= bb - hi; bb = hi
+        if a < lo:
+            bb = min(hi, bb + lo - a); a = lo
+        d = dict(b)
+        d["bbox_mm"] = [nx0, max(a, lo), nx1, min(bb, hi)]
+        out.append(d)
+    return out
+
+
 def build_page_spec(page_mm, table, blocks, images, source):
     W, H = page_mm
+    blocks = pad_blocks(blocks, table, page_mm)
     fx, fy = [0.0, W], [0.0, H]
     freex, freey = [], []
     if table:

@@ -91,3 +91,10 @@ PDF 3개 (data/pdfs/*.pdf, 텍스트 레이어 있음):
 - 표 위/아래 텍스트 줄 포함, 배경색 오인식 0건, 한 열 안 글자 크기 일관
 - 장당 처리 ≤60초
 공통: 합성 회귀(v1 기준) 유지
+
+---
+# v3 추가 (2026-10-05 3라운드)
+- 진입점 `python -m sheetparser convert <input> [-o DIR] [--title T] [--delete]`: pdf_vector / pdf_scan(300dpi 렌더, 원근 보정 생략) / photo 자동 판별. 사진 경로 verify_photo, PDF 벡터 verify.
+- 굵기: PDF는 `fake_bold_keys`(texttrace type=1) 포함. verify 에 굵기 일치율(`bold_match_pct`) 추가.
+- Apps Script action `list`: sheetparser-poc 폴더 파일 {id, name, created, url}.
+- 결과는 docs/RESULTS.md, 사용법은 README.md.

@@ -81,12 +81,15 @@ def main_v1(spec_path, outdir):
 # ------------------------------------------------------------------ v2 페이지 모드
 def _chars(page):
     out = []
+    fk = PV.fake_bold_keys(page)
     for b in page.get_text("rawdict")["blocks"]:
         for l in b.get("lines", []):
             for sp in l["spans"]:
+                f = sp["font"].lower()
+                sb = bool(sp["flags"] & 16) or "bold" in f
                 for ch in sp["chars"]:
                     if ch["c"].strip():
-                        out.append((ch["c"], ch["bbox"], ch["origin"], sp["size"]))
+                        out.append((ch["c"], ch["bbox"], ch["origin"], sp["size"], sb or PV._is_fake(fk, ch["origin"])))
     return out
 
 
@@ -105,7 +108,7 @@ def _find(chars, text, near_mm):
         d = math.hypot(cx - near_mm[0], cy - near_mm[1]) if near_mm else 0
         if best is None or d < best[0]:
             sizes = sorted(c[3] for c in seg)
-            best = (d, {"cx": cx, "by": by * PV.PT_MM, "size": sizes[len(sizes) // 2], "x0": x0 * PV.PT_MM, "x1": x1 * PV.PT_MM})
+            best = (d, {"cx": cx, "by": by * PV.PT_MM, "size": sizes[len(sizes) // 2], "bold": sum(c[4] for c in seg) * 2 > len(seg), "x0": x0 * PV.PT_MM, "x1": x1 * PV.PT_MM})
         i = s.find(t, i + 1)
     return best[1] if best else None
 
@@ -179,7 +182,8 @@ def main_v2(spec_path, outdir, delete=False):
         b = _find(cs, t, (a["cx"], a["by"]) if a else near)
         it = {"text": t.replace("\n", " ")[:24], "role": c.get("role", "table"), "found": b is not None}
         if a and b:
-            it.update({"dx": b["cx"] - a["cx"], "dy": b["by"] - a["by"], "dsize": b["size"] - a["size"]})
+            it.update({"dx": b["cx"] - a["cx"], "dy": b["by"] - a["by"], "dsize": b["size"] - a["size"],
+                       "bold_o": a["bold"], "bold_s": b["bold"], "bold_spec": bool(c.get("bold"))})
         items.append(it)
     nf = sum(i["found"] for i in items)
     res["text_items"] = len(items)
@@ -194,6 +198,11 @@ def main_v2(spec_path, outdir, delete=False):
             ds = [abs(i["dsize"]) for i in sel]
             res[role + "_size_err_pt"] = {"mean": round(float(np.mean(ds)), 2), "max": round(max(ds), 2)}
     res["items"] = [{k: (round(v, 2) if isinstance(v, float) else v) for k, v in i.items()} for i in items]
+    bi = [i for i in items if "bold_o" in i]
+    if bi:   # 굵기 일치율: 원본 PDF 글자 굵기 vs 시트 PDF 글자 굵기 (칸/블록 단위)
+        res["bold_match_pct"] = round(100 * sum(i["bold_o"] == i["bold_s"] for i in bi) / len(bi), 1)
+        res["bold_orig_count"] = sum(i["bold_o"] for i in bi)
+        res["bold_spec_vs_orig_pct"] = round(100 * sum(i["bold_o"] == i["bold_spec"] for i in bi) / len(bi), 1)
     # 3) 잉크 IoU
     ko = np.ones((5, 5), np.uint8)  # 2px 팽창
     a, b = _ink(oimg), _ink(simg)
@@ -219,5 +228,8 @@ def main_v2(spec_path, outdir, delete=False):
 def main(spec_path, outdir, delete=False):
     spec = json.load(open(spec_path))
     if spec.get("version") == 2:
+        if spec["source"].get("kind") in ("photo", "pdf_scan"):   # 원본이 이미지: 격자선 + 글자/굵기 검증
+            from . import verify_photo
+            return verify_photo.main(spec_path, outdir, delete)
         return main_v2(spec_path, outdir, delete)
     return main_v1(spec_path, outdir)

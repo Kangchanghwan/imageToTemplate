@@ -84,7 +84,8 @@ def find_blocks(img, fgray, tb):
         ih = bot - top
         ul = any(t[2] >= 0.6 * (xb - xa) and t[0] >= xa - 3 * PPM and t[0] + t[2] <= xb + 3 * PPM
                  and 0 <= t[1] - bot <= 4 * PPM for t in thin)
-        out.append({"bbox": (xa, ya, xb, yb), "ink_h": core_h, "bold": bool(ih and stroke / ih > 0.135), "underline": ul})
+        out.append({"bbox": (xa, ya, xb, yb), "ink_h": core_h, "bold": bool(ih and stroke / ih > 0.135), "underline": ul,
+                    "stroke_ratio": float(stroke / ih) if ih else 0.0})
     merged = True
     while merged:
         merged = False
@@ -97,7 +98,8 @@ def find_blocks(img, fgray, tb):
                 if ov >= 0.6 * min(ay1 - ay0, by1 - by0) and gap <= 20 * PPM:
                     bb = (min(a["bbox"][0], b["bbox"][0]), min(ay0, by0), max(a["bbox"][2], b["bbox"][2]), max(ay1, by1))
                     big = a if (a["bbox"][3] - a["bbox"][1]) >= (b["bbox"][3] - b["bbox"][1]) else b
-                    out[i] = {"bbox": bb, "ink_h": big["ink_h"], "bold": big["bold"], "underline": a["underline"] or b["underline"]}
+                    out[i] = {"bbox": bb, "ink_h": big["ink_h"], "bold": big["bold"], "underline": a["underline"] or b["underline"],
+                              "stroke_ratio": big.get("stroke_ratio", 0.0)}
                     del out[j]; merged = True
                     break
             if merged:
@@ -128,13 +130,18 @@ def _extend_left(grid, mask):
     return g
 
 
-def run_page(path, ocr=True, debug_dir=None, source_path=None):
+def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
+    """kind="pdf_scan": 입력이 이미 10px/mm 로 정규화된 용지 이미지이므로 원근 보정을 생략한다."""
     t0 = time.time()
-    img0 = cv2.imread(path)
+    if img0 is None:
+        img0 = cv2.imread(path)
     if img0 is None:
         raise RuntimeError("cannot read " + str(path))
-    img, pg_mm, flags = PP.rectify(img0)
-    if any(f["reason"].startswith(("no_paper", "paper_")) for f in flags):
+    if kind == "pdf_scan":
+        img, pg_mm, flags = img0, [round(img0.shape[1] / PPM, 1), round(img0.shape[0] / PPM, 1)], [{"reason": "pdf_scan_no_perspective"}]
+    else:
+        img, pg_mm, flags = PP.rectify(img0)
+    if kind != "pdf_scan" and any(f["reason"].startswith(("no_paper", "paper_")) for f in flags):
         img, org, ok = PP.table_rectify(img, keep_frame=True)
         flags.append({"reason": "table_quad_rectified" if ok else "table_quad_failed"})
         flags.append({"reason": "mm_scale_from_table_estimate"})
@@ -301,14 +308,29 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None):
             bycol.setdefault(c["c"], []).append(c["_sz"])
     hdr_m = mode(hdr) if hdr else None
     col_m = {k: mode(v) for k, v in bycol.items()}
+    allbody = [v for vs in bycol.values() for v in vs]
+    body_m = mode(allbody) if allbody else None
+    # 굵기: 머리글 행은 행 단위, 본문은 열 단위 다수결 (글자 있는 칸만, 열 단위 표본이 3개 미만이면 본문 전체)
+    def maj(vals):
+        return bool(vals) and sum(vals) * 2 > len(vals)
+    hdr_b = maj([c["bold"] for c in cells if c["r"] < HR and c["text"]])
+    col_b = {}
     for c in cells:
-        if "_sz" not in c:
+        if c["r"] >= HR and c["cs"] == 1 and c["text"]:
+            col_b.setdefault(c["c"], []).append(c["bold"])
+    body_b = maj([b for v in col_b.values() for b in v])
+    col_b = {k: (maj(v) if len(v) >= 3 else body_b) for k, v in col_b.items()}
+    meta["bold_dbg"] = {"hdr": hdr_b, "cols": {str(k): v for k, v in col_b.items()}}
+    for c in cells:
+        if not c["text"]:
             continue
-        if c["r"] < HR and hdr_m:
-            c["size_pt"] = hdr_m
-        elif c["cs"] == 1 and c["c"] in col_m:
-            c["size_pt"] = col_m[c["c"]]
-        else:
+        if c["r"] < HR:   # 머리글 행: 행 단위 최빈값 (측정 실패 칸도 같은 값)
+            c["size_pt"] = hdr_m if hdr_m else c["size_pt"]
+            c["bold"] = hdr_b
+        elif c["cs"] == 1:   # 본문: 열 단위 최빈값. 측정 실패(잉크가 테두리에 닿음 등)한 칸도 열 값을 따른다
+            c["size_pt"] = col_m.get(c["c"], body_m if body_m else c["size_pt"])
+            c["bold"] = col_b.get(c["c"], body_b)
+        elif "_sz" in c:
             c["size_pt"] = round(c["_sz"] * 2) / 2
     # --- 표 밖 텍스트 ---
     blocks = []
@@ -334,9 +356,15 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None):
             if by0 < ty1 + 0.3 and y0 / PPM >= ty1 - 1:
                 by0 = ty1 + 0.3
             bx1 = min(x1 / PPM + 0.12 * (x1 - x0) / PPM, pg_mm[0] - 1.0)   # 시트 글꼴이 더 넓어도 안 잘리게 오른쪽 여유
-            blocks.append({"bbox_mm": [x0 / PPM, by0, max(bx1, x1 / PPM), by1], "text": t.strip(),
+            bb = [x0 / PPM, by0, max(bx1, x1 / PPM), by1]
+            hh = "LEFT"
+            tx0, tx1 = tb[0] / PPM, tb[2] / PPM
+            if abs((x0 + x1) / 2 / PPM - (tx0 + tx1) / 2) < 0.06 * (tx1 - tx0) and x0 / PPM > tx0 - 3 and x1 / PPM < tx1 + 3:
+                bb[0], bb[2], hh = tx0, tx1, "CENTER"   # 표 가운데 제목: 표 전체 폭으로 병합 + 가운데 정렬 (넘침/잘림 방지)
+            blocks.append({"bbox_mm": bb, "text": t.strip(),
                            "size_pt": ST.size_from_ink(b["ink_h"], t), "bold": b["bold"], "underline": b["underline"],
-                           "font": FONT, "italic": False, "color": "#000000", "h": "LEFT", "v": "MIDDLE"})
+                           "font": FONT, "italic": False, "color": "#000000", "h": hh, "v": "MIDDLE",
+                           "_stroke": round(b.get("stroke_ratio", 0), 3)})
         meta["sec_blocks"] = round(time.time() - t1, 1)
     # 페이지 전체 크기 단계
     allsz = [c["size_pt"] for c in cells if c["text"]] + [b["size_pt"] for b in blocks]
@@ -347,6 +375,13 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None):
                 c["size_pt"] = mp[round(c["size_pt"] * 2) / 2]
         for b in blocks:
             b["size_pt"] = mp[round(b["size_pt"] * 2) / 2]
+    # 제목: 표 가운데에 놓인 본문보다 확연히 큰 글줄은 굵게 (큰 글자는 잉크 두께 비율이 낮게 측정되어 굵기 판정이 늘 보통으로 나온다)
+    bsz = [c["size_pt"] for c in cells if c["r"] >= HR and c["text"] and c["cs"] == 1]
+    if bsz:
+        bm = float(np.median(bsz))
+        for b in blocks:
+            if b["h"] == "CENTER" and b["size_pt"] >= 1.2 * bm and b["_stroke"] >= 0.08:
+                b["bold"] = True
     # 열별 글자 크기 분산(본문)
     cs_ = {}
     for c in cells:
@@ -355,11 +390,12 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None):
     meta["tb"] = [int(v) for v in tb]
     meta["col_size_std"] = {str(k): round(float(np.std(v)), 2) for k, v in cs_.items()}
     meta["bg_cells"] = nbg
+    meta["stroke_dbg"] = [[c["r"], c["c"], round(c["_info"].get("stroke_ratio", 0), 3)] for c in cells if c["text"] and "_info" in c]
     for c in cells:
         for k in ("_rect", "_info", "_empty", "_sz"):
             c.pop(k, None)
     table = {"x_mm": xs_mm, "y_mm": ys_mm, "cells": cells, "borders": borders}
-    src = {"path": source_path or path, "kind": "photo", "page": 0}
+    src = {"path": source_path or path, "kind": kind, "page": 0}
     spec = LAY.build_page_spec(pg_mm, table, blocks, [], src)
     spec["flags"] = list(spec.get("flags", [])) + flags + cflags
     for e in grid["extras"]:

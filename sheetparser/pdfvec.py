@@ -62,9 +62,31 @@ def _rgb_hex(c):
     return "#%02x%02x%02x" % tuple(int(round(v * 255)) for v in c)
 
 
+def fake_bold_keys(page):
+    """굴림처럼 폰트명에 Bold 가 없는 글꼴은 글자를 fill+stroke(텍스트 렌더모드 2, texttrace type 1)로 한 번 더 그려 굵게 만든다.
+    stroke 로 그려진 글자의 원점을 모아 둔다. {(round(x*4), round(y*4))}"""
+    keys = set()
+    try:
+        tr = page.get_texttrace()
+    except Exception:
+        return keys
+    for t in tr:
+        if t.get("type") != 1:
+            continue
+        for ch in t["chars"]:
+            keys.add((int(round(ch[2][0] * 4)), int(round(ch[2][1] * 4))))
+    return keys
+
+
+def _is_fake(keys, origin):
+    x, y = int(round(origin[0] * 4)), int(round(origin[1] * 4))
+    return any((x + dx, y + dy) in keys for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+
+
 def text_lines(page):
     """rawdict -> 줄 목록. 각 줄: spans, chars(공백 포함 [(ch, x0, x1, size, bold, color)]), bbox, origin_y."""
     out = []
+    fk = fake_bold_keys(page)
     for b in page.get_text("rawdict")["blocks"]:
         for l in b.get("lines", []):
             chars, sizes = [], []
@@ -74,7 +96,8 @@ def text_lines(page):
                 f = sp["font"].lower()
                 bold = bool(sp["flags"] & 16) or "bold" in f
                 for ch in sp["chars"]:
-                    chars.append((ch["c"], ch["bbox"][0], ch["bbox"][2], sp["size"], bold, sp["color"], sp["font"]))
+                    chars.append((ch["c"], ch["bbox"][0], ch["bbox"][2], sp["size"], bold or _is_fake(fk, ch["origin"]),
+                                  sp["color"], sp["font"]))
                 if any(c["c"].strip() for c in sp["chars"]):
                     y0, y1 = min(y0, sp["bbox"][1]), max(y1, sp["bbox"][3])
                     oy = sp["origin"][1] if oy is None else oy

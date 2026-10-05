@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 data/synth/
 data/pdfs/
+tmp/
+data/scan/

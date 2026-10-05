@@ -3,6 +3,8 @@ import base64
 import copy
 import json
 import os
+import time
+import urllib.error
 import urllib.request
 
 
@@ -25,7 +27,17 @@ def call(action, **kw):
     body = json.dumps(dict(key=key, action=action, **kw)).encode()
     # urllib는 302에서 POST를 GET으로 바꿔 따라간다 (curl -L 과 동일)
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    return json.load(urllib.request.urlopen(req, timeout=120))
+    for k in range(4):
+        try:
+            r = json.load(urllib.request.urlopen(req, timeout=120))
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:   # 웹앱 리디렉트가 가끔 404/일시 오류
+            if k == 3:
+                raise
+            time.sleep(4); continue
+        if r.get("msg") != "sheetparser-writer":   # 가끔 POST 가 doGet 응답(상태 메시지)으로 돌아온다: 잠깐 기다렸다 재시도
+            return r
+        time.sleep(3)
+    return r
 
 
 def upload(spec, title="sheetparser"):

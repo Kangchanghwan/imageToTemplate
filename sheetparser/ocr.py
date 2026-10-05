@@ -154,13 +154,15 @@ def read_neighbors(img, rects, target):
 
 
 def read_line(img, bbox):
-    """표 밖 텍스트 한 줄 읽기."""
+    """표 밖 텍스트 한 줄 읽기. 위아래/좌우에 여유 영역을 두어 가장자리 글자가 잘리지 않게 하고(축소 없음),
+    클립 같은 물체가 글자를 가려도 보이지 않는 글자를 지어내지 않도록 지시한다."""
     H, W = img.shape[:2]
     x0, y0, x1, y1 = bbox
-    m = 14
-    crop = _pad43(img[max(int(y0) - m, 0):min(int(y1) + m, H), max(int(x0) - m, 0):min(int(x1) + m, W)])
-    prompt = ("한 줄의 글자가 있는 이미지다. 보이는 그대로 받아 적어라. 괄호 안 빈칸은 공백으로 둔다. "
-              "글자가 없으면 \"\". JSON {\"text\": \"...\"} 로만 답한다.")
+    mx, my = 70, 30
+    crop = _pad43(img[max(int(y0) - my, 0):min(int(y1) + my, H), max(int(x0) - mx, 0):min(int(x1) + mx, W)])
+    prompt = ("이미지 가운데 한 줄의 글자가 있다(주변에 다른 선이나 물체가 보일 수 있다). 가운데 줄의 글자만 보이는 그대로 받아 적어라. "
+              "클립 같은 물체가 글자 위를 지나가도, 일부 획이 보이는 글자는 읽는다. 전혀 보이지 않는 글자는 지어내지 않는다. "
+              "괄호 안 빈칸은 공백으로 둔다. 글자가 없으면 \"\". JSON {\"text\": \"...\"} 로만 답한다.")
     schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
     o = _ask(crop, prompt, schema, 200, "line")
     return None if not o else str(o["text"])

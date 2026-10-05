@@ -212,8 +212,15 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
                         if mr < b < mr + mrs:
                             b = mr + mrs; moved = True
                 chunks.append((a, b)); a = b
-        rowmode = sparse and R > 8   # 빈 양식: 잉크 있는 행만 행 단위로 읽는다 (열/행 밀림 방지)
-        if rowmode:
+        paddle = OCR.BACKEND in ("paddle", "hybrid")
+        rowmode = sparse and R > 8 and not paddle   # 빈 양식: 잉크 있는 행만 행 단위로 읽는다 (열/행 밀림 방지)
+        if paddle:
+            chunks = []
+            mat, pconf = OCR.paddle_cells(flat, cells, R, C)
+            meta["calls"] += sum(1 for c in cells if not c["_empty"])
+            if OCR.BACKEND == "hybrid":
+                mat = OCR.hybrid_fix(flat, cells, mat, pconf, xs_mm, C, meta)
+        elif rowmode:
             chunks = []
             mat = [[""] * C for _ in range(R)]
             for r in range(R):
@@ -269,7 +276,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
                 tx = [c["text"] for c in rc if c["text"] and not c["text"].replace(".", "").isdigit()]
                 if any(not c["_empty"] and not c["text"] for c in rc) or len(tx) != len(set(tx)):
                     trig.append(r)
-            for r in trig[:14]:
+            for r in (trig[:14] if not paddle else []):
                 rc = rowcells(r)
                 bb = (tb[0], grid["ys"][r], tb[2], grid["ys"][r + 1])
                 want = [i for i, c in enumerate(rc) if not c["_empty"]]
@@ -282,7 +289,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
                     for c, t in zip(rc, res):
                         c["text"] = t.strip() if not c["_empty"] else ""
             sus = [c for c in cells if not c["_empty"] and not c["text"]]
-            for c in sus[:12]:  # 잉크는 있는데 빈칸 -> 이웃 포함 크롭 재질의
+            for c in (sus[:12] if not paddle else []):  # 잉크는 있는데 빈칸 -> 이웃 포함 크롭 재질의
                 cols = [j for j in (c["c"] - 1, c["c"], c["c"] + 1) if 0 <= j < C]
                 rects = [(xs_mm[j] * PPM, c["_rect"][1], xs_mm[j + 1] * PPM, c["_rect"][3]) for j in cols]
                 t = OCR.read_neighbors(flat, rects, cols.index(c["c"]))
@@ -347,7 +354,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
                 flags.append({"reason": "block_dropped_outside_paper_or_tiny", "bbox_mm": [round(v / PPM, 1) for v in b["bbox"]]})
                 continue
             if ocr:
-                t = OCR.read_line(flat, b["bbox"])
+                t = OCR.read_line_paddle(flat, b["bbox"]) if OCR.BACKEND == "paddle" else OCR.read_line(flat, b["bbox"])
                 meta["calls"] += 1
             else:
                 t = "x"

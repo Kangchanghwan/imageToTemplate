@@ -224,3 +224,122 @@ def read_row(img, bbox, widths, want=None):
     for i, t in zip(want, ls[0].split("|")):
         out[i] = t.strip()
     return out
+
+
+# ---- 5라운드: 백엔드 선택 (paddle | qwen8b | qwen32b | hybrid) ----
+BACKEND = os.environ.get("OCR_BACKEND", "qwen32b")
+URLS = {"qwen32b": os.environ.get("VLM_URL", "http://127.0.0.1:18001/v1/chat/completions"),
+        "qwen8b": os.environ.get("VLM8_URL", "http://127.0.0.1:18002/v1/chat/completions"),
+        "paddle": os.environ.get("PADDLE_URL", "http://127.0.0.1:18003/v1/chat/completions")}
+PADDLE_STATS = {"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0}
+
+
+def set_backend(name):
+    """qwen8b 는 표 전체 호출 경로를 그대로 쓰되 서버 주소만 바꾼다. paddle 은 칸 단위 크롭 병렬 호출. hybrid 는 paddle + 의심 칸만 32B."""
+    global BACKEND, URL
+    BACKEND = name
+    URL = URLS["qwen8b"] if name == "qwen8b" else URLS["qwen32b"]
+
+
+def _paddle_one(crop, url=None):
+    """PaddleOCR-VL 에 "OCR:" 프롬프트로 크롭 1개. 반환 (텍스트, 최소 토큰 확률)."""
+    h, w = crop.shape[:2]
+    pd = int(os.environ.get("PADDLE_PAD", "0"))
+    if pd:
+        crop = cv2.copyMakeBorder(crop, pd, pd, pd, pd, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    body = {"model": "paddle", "temperature": 0, "max_tokens": 64, "logprobs": True,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + _png(crop)}},
+                {"type": "text", "text": "OCR:"}]}]}
+    req = urllib.request.Request(url or URLS["paddle"], data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    r = json.load(urllib.request.urlopen(req, timeout=120))
+    ch = r["choices"][0]
+    lp = [t["logprob"] for t in (ch.get("logprobs") or {}).get("content", []) if "logprob" in t]
+    import math
+    return " ".join(ch["message"]["content"].split()), (math.exp(min(lp)) if lp else 1.0)
+
+
+def _ink_tight(crop, pad=14):
+    """칸 크롭에서 진한 잉크 덩어리만 감싸는 사각형으로 조인다(옅은 비침/테두리 찌꺼기가 글자로 읽히는 것 방지)."""
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    if g.size == 0:
+        return crop
+    bg = float(np.percentile(g, 80))
+    m = ((bg - g) > 70).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    boxes = [st[i] for i in range(1, n) if st[i][4] >= 12 and st[i][3] >= 6]
+    if not boxes:
+        return crop
+    x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
+    x1 = max(b[0] + b[2] for b in boxes); y1 = max(b[1] + b[3] for b in boxes)
+    H, W = g.shape
+    return crop[max(y0 - pad, 0):min(y1 + pad, H), max(x0 - pad, 0):min(x1 + pad, W)]
+
+
+def paddle_cells(img, cells, R, C, workers=int(os.environ.get("PADDLE_WORKERS", "4"))):
+    """잉크 있는 칸마다 크롭해 병렬로 읽는다. 반환 (R x C 문자열 행렬, {(r,c): 최소 토큰 확률})."""
+    from concurrent.futures import ThreadPoolExecutor
+    H, W = img.shape[:2]
+    todo = [c for c in cells if not c["_empty"]]
+
+    def job(c):
+        x0, y0, x1, y1 = [int(v) for v in c["_rect"]]
+        crop = img[max(y0 + 3, 0):min(y1 - 3, H), max(x0 + 3, 0):min(x1 - 3, W)]
+        crop = _ink_tight(crop)
+        for k in range(2):
+            try:
+                return _paddle_one(crop)
+            except Exception:
+                time.sleep(1)
+        return "", 0.0
+    t0 = time.time()
+    with ThreadPoolExecutor(workers) as ex:
+        res = list(ex.map(job, todo))
+    PADDLE_STATS["calls"] += len(todo)
+    PADDLE_STATS["sec"] += time.time() - t0
+    mat = [[""] * C for _ in range(R)]
+    conf = {}
+    for c, (t, p) in zip(todo, res):
+        mat[c["r"]][c["c"]] = t
+        conf[(c["r"], c["c"])] = p
+    return mat, conf
+
+
+def read_line_paddle(img, bbox):
+    H, W = img.shape[:2]
+    x0, y0, x1, y1 = bbox
+    crop = img[max(int(y0) - 12, 0):min(int(y1) + 12, H), max(int(x0) - 20, 0):min(int(x1) + 20, W)]
+    try:
+        t, _ = _paddle_one(crop)
+        PADDLE_STATS["calls"] += 1
+        return t
+    except Exception:
+        return ""
+
+
+CONF_MIN = float(os.environ.get("HYBRID_CONF", "0.95"))
+
+
+def hybrid_fix(img, cells, mat, pconf, xs_mm, C, meta):
+    """paddle 결과 중 의심 칸(빈 글자, 낮은 토큰 확률)만 32B 에 이웃 포함 크롭으로 재질의."""
+    PPM = 10
+    n = 0
+    for c in cells:
+        if c["_empty"]:
+            continue
+        r, k = c["r"], c["c"]
+        t = mat[r][k]
+        if t and pconf.get((r, k), 0) >= CONF_MIN:
+            continue
+        PADDLE_STATS["suspect"] += 1
+        cols = [j for j in (k - 1, k, k + 1) if 0 <= j < C]
+        rects = [(xs_mm[j] * PPM, c["_rect"][1], xs_mm[j + 1] * PPM, c["_rect"][3]) for j in cols]
+        a = read_neighbors(img, rects, cols.index(k))
+        if a is not None:
+            a = a.translate({ord(ch): None for ch in "\u2705\u2714\u2611"})
+            if a.strip() and a.strip() != t:
+                meta.setdefault("hybrid_changed", []).append([r, k, t, a.strip(), round(pconf.get((r, k), 0), 3)])
+            mat[r][k] = a.strip() if a.strip() else t
+        PADDLE_STATS["requery"] += 1
+    return mat

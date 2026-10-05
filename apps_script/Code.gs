@@ -82,11 +82,19 @@ function create_(spec, title) {
     var fields = [];
     if (c.h) { fmt.horizontalAlignment = c.h; fields.push('horizontalAlignment'); }
     if (c.v) { fmt.verticalAlignment = c.v; fields.push('verticalAlignment'); }
-    if (c.wrap !== undefined) { fmt.wrapStrategy = c.wrap ? 'WRAP' : 'CLIP'; fields.push('wrapStrategy'); }
-    var tf = {fontFamily: DEFAULT_FONT}; fields.push('textFormat.fontFamily');
-    if (c.size_pt) { tf.fontSize = c.size_pt; fields.push('textFormat.fontSize'); }
+    if (c.wrap !== undefined) { fmt.wrapStrategy = c.wrap ? 'WRAP' : (c.role === 'text' ? 'OVERFLOW_CELL' : 'CLIP'); fields.push('wrapStrategy'); }
+    var tf = {fontFamily: c.font || DEFAULT_FONT}; fields.push('textFormat.fontFamily');
+    if (c.size_pt) { tf.fontSize = Math.max(1, Math.round(c.size_pt)); fields.push('textFormat.fontSize'); }
     if (c.bold !== undefined) { tf.bold = !!c.bold; fields.push('textFormat.bold'); }
+    if (c.underline !== undefined) { tf.underline = !!c.underline; fields.push('textFormat.underline'); }
+    if (c.italic !== undefined) { tf.italic = !!c.italic; fields.push('textFormat.italic'); }
+    var fg = hexToColor_(c.color);
+    if (fg) { tf.foregroundColor = fg; fields.push('textFormat.foregroundColor'); }
     fmt.textFormat = tf;
+    if (c.role === 'text') {  // v2 표 밖 텍스트: 여백 0, 넘치면 옆 칸으로
+      fmt.padding = {top: 0, bottom: 0, left: 0, right: 0}; fields.push('padding');
+      if (!c.wrap) fmt.wrapStrategy = 'OVERFLOW_CELL';
+    }
     var bg = hexToColor_(c.bg);
     if (bg) { fmt.backgroundColor = bg; fields.push('backgroundColor'); }
     var cell = {userEnteredFormat: fmt};
@@ -130,7 +138,16 @@ function create_(spec, title) {
   // 행 높이가 내용 때문에 늘지 않도록 강제 지정
   spec.rows.forEach(function (h, i) { sh.setRowHeightsForced(i + 1, 1, h); });
   SpreadsheetApp.flush();
-  return {ok: true, id: id, gid: gid, url: ss.getUrl(), nreq: reqs.length};
+  // v2: 격자 위에 떠 있는 이미지 (서명 등)
+  var nimg = 0;
+  (spec.images || []).forEach(function (im) {
+    var blob = Utilities.newBlob(Utilities.base64Decode(im.png_b64), 'image/png', 'img' + nimg + '.png');
+    var img = sh.insertImage(blob, im.c + 1, im.r + 1, Math.round(im.dx_px || 0), Math.round(im.dy_px || 0));
+    if (im.w_px && im.h_px) { img.setWidth(Math.round(im.w_px)); img.setHeight(Math.round(im.h_px)); }
+    nimg++;
+  });
+  SpreadsheetApp.flush();
+  return {ok: true, id: id, gid: gid, url: ss.getUrl(), nreq: reqs.length, nimg: nimg};
 }
 
 function pdf_(p) {

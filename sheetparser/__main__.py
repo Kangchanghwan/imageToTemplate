@@ -56,18 +56,18 @@ def main():
     ap = argparse.ArgumentParser(prog="sheetparser")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run"); r.add_argument("input"); r.add_argument("-o", required=True)
-    r.add_argument("--no-ocr", action="store_true"); r.add_argument("--debug-dir")
+    r.add_argument("--no-ocr", action="store_true"); r.add_argument("--v1", action="store_true"); r.add_argument("--debug-dir")
     s = sub.add_parser("score"); s.add_argument("pred"); s.add_argument("gt")
     y = sub.add_parser("synth"); y.add_argument("-o", required=True); y.add_argument("-n", type=int, default=12)
     b = sub.add_parser("bench"); b.add_argument("dir"); b.add_argument("-o", default="runs/bench")
     b.add_argument("--ocr-n", type=int, default=0); b.add_argument("--modes", default="vector,photo")
     u = sub.add_parser("upload"); u.add_argument("spec"); u.add_argument("--title")
     v = sub.add_parser("verify"); v.add_argument("spec"); v.add_argument("-o", default="runs/verify")
-    v.add_argument("--keep", action="store_true", help="시트를 지우지 않는다(기본도 유지)")
+    v.add_argument("--keep", action="store_true", help="시트를 지우지 않는다(기본도 유지)"); v.add_argument("--delete", action="store_true")
     a = ap.parse_args()
     if a.cmd == "run":
         from . import pipeline
-        sp = pipeline.run(a.input, ocr=not a.no_ocr, debug_dir=a.debug_dir)
+        sp = pipeline.run(a.input, ocr=not a.no_ocr, debug_dir=a.debug_dir, v1=a.v1)
         json.dump(sp, open(a.o, "w"), ensure_ascii=False, indent=1)
         print("rows=%d cols=%d merges=%d" % (len(sp["rows"]), len(sp["columns"]),
               sum(1 for c in sp["cells"] if c["rs"] > 1 or c["cs"] > 1)))
@@ -84,7 +84,7 @@ def main():
         print(json.dumps(upload.upload(json.load(open(a.spec)), a.title or os.path.basename(a.spec)), ensure_ascii=False))
     elif a.cmd == "verify":
         from . import verify
-        verify.main(a.spec, a.o)
+        verify.main(a.spec, a.o, a.delete)
 
 
 main()

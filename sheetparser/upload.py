@@ -6,6 +6,9 @@ import os
 import urllib.request
 
 
+SHEET_PT_SCALE = 0.975
+
+
 def _env():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env = {}
@@ -31,7 +34,7 @@ def upload(spec, title="sheetparser"):
     s["columns"] = [max(1, c - 1) for c in s["columns"]]
     s.pop("meta", None)
     for c in s["cells"]:  # Sheets API font_size 는 int32
-        c["size_pt"] = max(1, int(round(c["size_pt"])))
+        c["size_pt"] = c.pop("sheet_pt", None) or max(1, int(c["size_pt"] / SHEET_PT_SCALE + 0.5))  # 시트 PDF 내보내기는 글자를 0.975배로 그린다 (실측)
     return call("create", spec=s, title=title)
 
 

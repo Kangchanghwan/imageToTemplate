@@ -333,7 +333,8 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None):
                 by1 = ty0 - 0.3
             if by0 < ty1 + 0.3 and y0 / PPM >= ty1 - 1:
                 by0 = ty1 + 0.3
-            blocks.append({"bbox_mm": [x0 / PPM, by0, x1 / PPM, by1], "text": t.strip(),
+            bx1 = min(x1 / PPM + 0.12 * (x1 - x0) / PPM, pg_mm[0] - 1.0)   # 시트 글꼴이 더 넓어도 안 잘리게 오른쪽 여유
+            blocks.append({"bbox_mm": [x0 / PPM, by0, max(bx1, x1 / PPM), by1], "text": t.strip(),
                            "size_pt": ST.size_from_ink(b["ink_h"], t), "bold": b["bold"], "underline": b["underline"],
                            "font": FONT, "italic": False, "color": "#000000", "h": "LEFT", "v": "MIDDLE"})
         meta["sec_blocks"] = round(time.time() - t1, 1)

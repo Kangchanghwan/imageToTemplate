@@ -327,7 +327,13 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None):
             if not t or not any(ch.isalnum() for ch in t):
                 flags.append({"reason": "block_dropped_unreadable", "bbox_mm": [round(v / PPM, 1) for v in b["bbox"]]})
                 continue
-            blocks.append({"bbox_mm": [x0 / PPM, y0 / PPM, x1 / PPM, y1 / PPM], "text": t.strip(),
+            ty0, ty1 = tb[1] / PPM, tb[3] / PPM
+            by0, by1 = y0 / PPM - 1.2, y1 / PPM + 1.2   # 글자 높이에 맞는 행 높이 확보(잘림 방지)
+            if by1 > ty0 - 0.3 and y1 / PPM <= ty0 + 1:
+                by1 = ty0 - 0.3
+            if by0 < ty1 + 0.3 and y0 / PPM >= ty1 - 1:
+                by0 = ty1 + 0.3
+            blocks.append({"bbox_mm": [x0 / PPM, by0, x1 / PPM, by1], "text": t.strip(),
                            "size_pt": ST.size_from_ink(b["ink_h"], t), "bold": b["bold"], "underline": b["underline"],
                            "font": FONT, "italic": False, "color": "#000000", "h": "LEFT", "v": "MIDDLE"})
         meta["sec_blocks"] = round(time.time() - t1, 1)

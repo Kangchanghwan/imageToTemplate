@@ -140,3 +140,72 @@ def content_score(spec, gt_all, name):
                     "wrong": miss, "block_ok": not miss_b, "block_missing": miss_b})
     out["block_text"] = [c.get("text", "") for c in spec["cells"] if c.get("role") == "text"]
     return out
+
+
+# ---- v3 (8라운드): 구조 정답 채점. 정답 = 같은 PDF 의 pdf_vector 경로 결과 ----
+def table_view(spec):
+    """페이지 PageSpec 에서 표(role=table)만 뽑아 표 로컬 격자로 환산: xs/ys(mm) 경계, cells=[(r,c,rs,cs,text)]."""
+    px, py = spec["meta"]["x_mm"], spec["meta"]["y_mm"]
+    tc = [c for c in spec["cells"] if c.get("role", "table") == "table"]
+    if not tc:
+        return None
+    ex = sorted({round(v, 2) for c in tc for v in (px[c["c"]], px[c["c"] + c["cs"]])})
+    ey = sorted({round(v, 2) for c in tc for v in (py[c["r"]], py[c["r"] + c["rs"]])})
+
+    def mrg(vals, tol=0.3):
+        out = []
+        for v in vals:
+            if out and v - out[-1] < tol:
+                continue
+            out.append(v)
+        return out
+    ex, ey = mrg(ex), mrg(ey)
+    ix = lambda v: min(range(len(ex)), key=lambda i: abs(ex[i] - v))
+    iy = lambda v: min(range(len(ey)), key=lambda i: abs(ey[i] - v))
+    cells = []
+    for c in tc:
+        r0, r1 = iy(py[c["r"]]), iy(py[c["r"] + c["rs"]])
+        c0, c1 = ix(px[c["c"]]), ix(px[c["c"] + c["cs"]])
+        cells.append((r0, c0, r1 - r0, c1 - c0, c.get("text", "")))
+    return {"xs": ex, "ys": ey, "cells": cells}
+
+
+def struct_score(pred, gt):
+    """pred/gt: PageSpec. 행/열 수, 병합 집합, 열 너비 비율 오차(%), 표 외곽 bbox 오차(mm), 칸별 텍스트 일치율(공백 제거)."""
+    p, g = table_view(pred), table_view(gt)
+    out = {}
+    if p is None:
+        return {"rows_ok": False, "cols_ok": False, "merge_exact": False, "text_rate": 0.0, "error": "no_table"}
+    pr, pc = len(p["ys"]) - 1, len(p["xs"]) - 1
+    gr, gc = len(g["ys"]) - 1, len(g["xs"]) - 1
+    out.update({"rows": (pr, gr), "cols": (pc, gc), "rows_ok": pr == gr, "cols_ok": pc == gc})
+    mp = {(r, c, rs, cs) for (r, c, rs, cs, t) in p["cells"] if rs > 1 or cs > 1}
+    mg = {(r, c, rs, cs) for (r, c, rs, cs, t) in g["cells"] if rs > 1 or cs > 1}
+    out["merge_exact"] = mp == mg
+    out["merge_pred_gt"] = (len(mp), len(mg))
+    if pc == gc:
+        wp = [p["xs"][i + 1] - p["xs"][i] for i in range(pc)]
+        wg = [g["xs"][i + 1] - g["xs"][i] for i in range(gc)]
+        sp, sg = sum(wp), sum(wg)
+        e = [abs(a / sp - b / sg) / (b / sg) * 100 for a, b in zip(wp, wg)]
+        out["col_w_err_mean"], out["col_w_err_max"] = sum(e) / len(e), max(e)
+    else:
+        out["col_w_err_mean"] = out["col_w_err_max"] = None
+    out["bbox_err_mm"] = [round(abs(a - b), 1) for a, b in zip((p["xs"][0], p["ys"][0], p["xs"][-1], p["ys"][-1]),
+                                                              (g["xs"][0], g["ys"][0], g["xs"][-1], g["ys"][-1]))]
+    pm = {(r, c, rs, cs): t for (r, c, rs, cs, t) in p["cells"]}
+    n = ok = 0
+    wrong = []
+    for (r, c, rs, cs, t) in g["cells"]:
+        if not _norm(t):
+            continue
+        n += 1
+        q = pm.get((r, c, rs, cs))
+        if q is not None and _norm(q) == _norm(t):
+            ok += 1
+        elif len(wrong) < 8:
+            wrong.append("r%d c%d 정답=%r 예측=%r" % (r, c, _norm(t)[:30], _norm(q)[:30] if q is not None else None))
+    out["text_n"], out["text_ok"] = n, ok
+    out["text_rate"] = ok / n if n else 1.0
+    out["text_wrong"] = wrong
+    return out

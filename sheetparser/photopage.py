@@ -352,7 +352,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
     # --- 글자 크기: 글줄 높이 -> 열/행 최빈값 -> 페이지 단계 ---
     for c in cells:
         if c["text"] and c["_info"].get("ink_h"):
-            c["_sz"] = ST.size_from_ink(c["_info"]["ink_h"], c["text"])
+            c["_sz"] = ST.size_from_ink(c["_info"]["ink_h"], c["text"], nlines=c["_info"].get("nlines") if len(c["text"].strip()) >= 12 else None)   # 짧은 글자는 자모 사이 틈이 줄로 세어진다
     def mode(vals):
         q = [round(v * 2) / 2 for v in vals]
         cnt = Counter(q).most_common()

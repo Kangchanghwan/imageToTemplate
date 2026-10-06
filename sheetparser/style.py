@@ -91,9 +91,9 @@ def analyze(img, gray, rect, inset=7):
 HANGUL_RATIO, LATIN_RATIO, LEAD = 0.88, 0.72, 1.2
 
 
-def size_from_ink(ink_h_px, text, ppm=PPM):
+def size_from_ink(ink_h_px, text, ppm=PPM, nlines=None):
     """잉크 bbox 높이(px)와 글 내용(줄 수, 한글 포함 여부)으로 글자 크기(pt) 추정."""
-    n = max(1, len((text or "").strip("\n").split("\n")))
+    n = max(1, len((text or "").strip("\n").split("\n")), nlines or 1)   # nlines: 이미지에서 센 글줄 수(칸 안에서 자동 줄바꿈된 글은 text 에 개행이 없다)
     hangul = any("\uac00" <= ch <= "\ud7a3" for ch in text or "")
     ratio = HANGUL_RATIO if hangul else LATIN_RATIO
     em_mm = ink_h_px / ppm / (ratio + LEAD * (n - 1))

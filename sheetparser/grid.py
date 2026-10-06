@@ -168,11 +168,29 @@ def trim_outer(grid, row_k=2.2, col_k=4.0):
         if len(hs) < 4 or len(ws) < 2:
             break
         mh, mw = float(np.median(hs)), float(np.median(ws))
-        side = None
-        if hs[0] > row_k * mh: side = "top"
-        elif hs[-1] > row_k * mh: side = "bottom"
-        elif len(ws) > 3 and ws[0] > col_k * mw: side = "left"
-        elif len(ws) > 3 and ws[-1] > col_k * mw: side = "right"
+        R, C = len(hs), len(ws)
+        h, v = grid["h"], grid["v"]
+
+        def closed(side):
+            """바깥 행/열이 실제 표의 일부인지: 양 끝이 선으로 닫히고 바깥 선이 거의 끝까지 이어지면 True.
+            (8라운드: 가장 넓은 마지막 열이 중앙값 4배를 넘는다는 이유만으로 잘리던 문제. 실제 표는 닫혀 있다.)"""
+            if side in ("left", "right"):
+                c = 0 if side == "left" else C - 1
+                j = 0 if side == "left" else C
+                if h[0][c] is None or h[R][c] is None:
+                    return False
+                return sum(1 for r in range(R) if v[r][j] is not None) >= 0.9 * R
+            r = 0 if side == "top" else R - 1
+            i = 0 if side == "top" else R
+            if v[r][0] is None or v[r][C] is None:
+                return False
+            return sum(1 for c in range(C) if h[i][c] is not None) >= 0.9 * C
+        cand = []
+        if hs[0] > row_k * mh: cand.append("top")
+        if hs[-1] > row_k * mh: cand.append("bottom")
+        if len(ws) > 3 and ws[0] > col_k * mw: cand.append("left")
+        if len(ws) > 3 and ws[-1] > col_k * mw: cand.append("right")
+        side = next((s_ for s_ in cand if not closed(s_)), None)
         if side is None:
             break
         R, C = len(hs), len(ws)

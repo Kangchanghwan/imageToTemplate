@@ -1,0 +1,17 @@
+{
+  "name": "sheetparser-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "sheetparser 사진/스캔 경로 CV 이식(OpenCV.js). 브라우저와 Node 공용 ES 모듈.",
+  "dependencies": {
+    "@techstark/opencv-js": "5.0.0-release.1"
+  },
+  "devDependencies": {
+    "jpeg-js": "0.4.4",
+    "pngjs": "7.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/npy.test.mjs"
+  }
+}

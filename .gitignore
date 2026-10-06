@@ -6,3 +6,5 @@ data/synth/
 data/pdfs/
 tmp/
 data/scan/
+web/node_modules/
+tools/parity/out*/

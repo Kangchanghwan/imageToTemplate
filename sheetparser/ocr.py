@@ -1,3 +1,4 @@
+import re
 """elgrim vlm(OpenAI 호환)에 셀/행 크롭을 보내 글자 채우기."""
 import base64
 import json
@@ -311,12 +312,12 @@ BACKEND = os.environ.get("OCR_BACKEND", "auto")
 URLS = {"qwen32b": os.environ.get("VLM_URL", "http://127.0.0.1:18001/v1/chat/completions"),
         "qwen8b": os.environ.get("VLM8_URL", "http://127.0.0.1:18002/v1/chat/completions"),
         "paddle": os.environ.get("PADDLE_URL", "http://127.0.0.1:18003/v1/chat/completions")}
-PADDLE_STATS = {"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0, "fail": 0, "empty": 0, "long": 0, "trunc": 0, "retry_ok": 0, "to32": 0, "max_prompt": 0, "max_out": 0}
+PADDLE_STATS = {"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0, "fail": 0, "empty": 0, "long": 0, "trunc": 0, "retry_ok": 0, "to32": 0, "max_prompt": 0, "max_out": 0, "han": 0, "han_fixed": 0}
 PADDLE_MAX = 512
 
 
 def paddle_reset():
-    PADDLE_STATS.update({"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0, "fail": 0, "empty": 0, "long": 0, "trunc": 0,
+    PADDLE_STATS.update({"han": 0, "han_fixed": 0, "calls": 0, "sec": 0.0, "suspect": 0, "requery": 0, "fail": 0, "empty": 0, "long": 0, "trunc": 0,
                          "retry_ok": 0, "to32": 0, "max_prompt": 0, "max_out": 0})
 ACTIVE = BACKEND   # 이번 장에서 실제로 쓰는 백엔드 (auto 는 photopage.run_page 가 장마다 정한다)
 
@@ -357,7 +358,7 @@ def read_crop32(crop, limit):
     return None if txt is None else " ".join(txt.split())
 
 
-def paddle_read(crop, est=None):
+def _paddle_read_raw(crop, est=None):
     """paddle 1칸 읽기 + 잘림 처리. 한도는 CV 추정(칸 글줄 수 x 잉크 폭)으로 정한다(64~512).
     잘리면(finish_reason=length) 한도를 2배(최대 512)로 1회 재요청, 그래도 잘리면 그 칸만 32B. 반환 (텍스트, 최소 토큰 확률)."""
     mt = int(min(PADDLE_MAX, max(64, est if est is not None else est_tokens(crop))))
@@ -375,6 +376,22 @@ def paddle_read(crop, est=None):
     if t3:
         return t3, 1.0
     return t, p
+
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def paddle_read(crop, est=None):
+    """paddle 1칸 읽기. 결과에 한자(CJK 통합 한자)가 섞이면 한국 학교 문서에선 거의 오독이므로
+    (예: 머리글 '순'을 '仝'로 읽음) 그 칸만 32B 로 다시 읽어, 32B 결과에 한자가 없으면 그것을 쓴다."""
+    t, p = _paddle_read_raw(crop, est)
+    if t and _HAN.search(t):
+        PADDLE_STATS["han"] += 1
+        t2 = read_crop32(crop, int(est_tokens(crop)))
+        if t2 and not _HAN.search(t2):
+            PADDLE_STATS["han_fixed"] += 1
+            return t2, 1.0
+    return t, p
+
 
 def _ink_tight(crop, pad=14):
     """칸 크롭에서 진한 잉크 덩어리만 감싸는 사각형으로 조인다(옅은 비침/테두리 찌꺼기가 글자로 읽히는 것 방지)."""

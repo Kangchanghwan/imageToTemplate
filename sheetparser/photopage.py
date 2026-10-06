@@ -763,7 +763,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
 
 
 def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
-    """OCR 백엔드 진입점. auto 면 사진(kind=photo)은 paddle, 스캔 PDF(pdf_scan)는 32B.
+    """OCR 백엔드 진입점. auto 면 사진(kind=photo)과 스캔 PDF(pdf_scan) 모두 paddle 우선.
     paddle 결과에 이상(요청 실패, 잉크 있는 칸이 빈 글자, 80자 초과 칸, 예외)이 있으면 그 장은 32B 로 다시 읽는다."""
     kw = dict(path=path, ocr=ocr, debug_dir=debug_dir, source_path=source_path, img0=img0, kind=kind)
     if OCR.BACKEND != "auto":
@@ -771,7 +771,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
         sp = _run_page(**kw)
         sp["meta"]["ocr_backend"] = OCR.ACTIVE
         return sp
-    if kind != "photo" or not ocr:
+    if kind not in ("photo", "pdf_scan") or not ocr:
         OCR.ACTIVE = "qwen32b"
         sp = _run_page(**kw)
         sp["meta"]["ocr_backend"] = "qwen32b"

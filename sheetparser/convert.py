@@ -71,7 +71,8 @@ def convert(path, outdir=None, title=None, delete=False, verify_on=False):
             "sheet_pdf": os.path.join(outdir, title + "_sheet.pdf"), "side_png": os.path.join(outdir, title + "_side.png"),
             "deleted": bool(delete), "verified": bool(verify_on),
             "sec_upload": round(time.time() - t0 - t_spec, 1), "vlm": spec.get("meta", {}).get("vlm"),
-            "calls": spec.get("meta", {}).get("calls")}
+            "calls": spec.get("meta", {}).get("calls"), "trunc": spec.get("meta", {}).get("trunc"),
+            "ocr_backend": spec.get("meta", {}).get("ocr_backend"), "auto_fallback": spec.get("meta", {}).get("auto_fallback")}
     gtp = os.path.join(os.path.dirname(os.path.abspath(path)), "gt_content.json")
     if verify_on and kind == "photo" and os.path.exists(gtp):
         c = score.content_score(spec, json.load(open(gtp)), stem)
@@ -95,4 +96,6 @@ def convert(path, outdir=None, title=None, delete=False, verify_on=False):
     if verify_on:
         print("  side:", summ["side_png"])
     print("  sec_spec: %s sec_upload: %s vlm: %s" % (summ["sec_spec"], summ["sec_upload"], summ["vlm"]))
+    print("  ocr_backend: %s auto_fallback: %s" % (summ["ocr_backend"], summ["auto_fallback"]))
+    print("  trunc(잘림/재요청/폴백): %s" % summ["trunc"])
     return summ

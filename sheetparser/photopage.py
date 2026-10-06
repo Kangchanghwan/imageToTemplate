@@ -108,6 +108,27 @@ def find_blocks(img, fgray, tb):
     return out
 
 
+def _bands(blocks, my=30):
+    """블록마다 세로 읽기 범위(px). 기본은 잉크 위아래 my px 여유인데, 가로로 겹치는 이웃 글줄의 잉크가 그 안에 들어오면
+    (줄 간격이 좁거나 괄호 때문에 잉크 높이가 서로 겹치는 두 줄 칸) 이웃과의 중간선에서 자른다."""
+    out = []
+    for i, b in enumerate(blocks):
+        x0, y0, x1, y1 = b["bbox"]
+        lo, hi = y0 - my, y1 + my
+        for j, o in enumerate(blocks):
+            if i == j or o["bbox"][2] <= x0 or o["bbox"][0] >= x1:
+                continue
+            ox0, oy0, ox1, oy1 = o["bbox"]
+            if (oy0 + oy1) / 2 < (y0 + y1) / 2:   # 위 이웃
+                if oy1 > lo:
+                    lo = max(lo, (oy1 + y0) / 2)
+            else:
+                if oy0 < hi:
+                    hi = min(hi, (y1 + oy0) / 2)
+        out.append((lo, hi))
+    return out
+
+
 def _extend_left(grid, mask):
     """표 왼쪽 선이 사진 밖으로 잘렸을 때: 첫 세로선 왼쪽 띠에 표 잉크가 있으면 0 에서 시작하는 열을 하나 더한다."""
     x0 = grid["xs"][0]
@@ -213,6 +234,12 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
                             b = mr + mrs; moved = True
                 chunks.append((a, b)); a = b
         paddle = OCR.ACTIVE in ("paddle", "hybrid")
+        if not paddle:   # 32B 호출 한도용: 칸마다 글줄 수 x 잉크 폭 -> 예상 출력 토큰
+            Hf, Wf = flat.shape[:2]
+            for c in cells:
+                if not c["_empty"]:
+                    x0_, y0_, x1_, y1_ = [int(v) for v in c["_rect"]]
+                    c["_est"] = OCR.est_tokens(flat[max(y0_ + 3, 0):min(y1_ - 3, Hf), max(x0_ + 3, 0):min(x1_ - 3, Wf)])
         rowmode = sparse and R > 8 and not paddle   # 빈 양식: 잉크 있는 행만 행 단위로 읽는다 (열/행 밀림 방지)
         if paddle:
             chunks = []
@@ -231,24 +258,46 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
                 sub = rc[:last + 1]   # 마지막 잉크 칸까지만 잘라 보낸다 (이미지가 작아 빠름)
                 res = OCR.read_row(flat, (tb[0], grid["ys"][r], xs_mm[sub[-1]["c"] + sub[-1]["cs"]] * PPM, grid["ys"][r + 1]),
                                    [xs_mm[c["c"] + c["cs"]] - xs_mm[c["c"]] for c in sub],
-                                   [i for i, c in enumerate(sub) if not c["_empty"]])
+                                   [i for i, c in enumerate(sub) if not c["_empty"]],
+                                   [c["_est"] for c in sub if not c["_empty"]])
                 meta["calls"] += 1
                 if res and len(res) == len(sub):
                     for c, t in zip(sub, res):
                         mat[r][c["c"]] = t
         else:
             mat = []
-        for (a, b) in chunks:
+        work = [(a, b, 1.0) for (a, b) in chunks]
+        while work:
+            a, b, mul = work.pop(0)
             sub = None
             cb = (tb[0], grid["ys"][a], tb[2], grid["ys"][b])
             mm = [(r - a, c, rs, cs) for (r, c, rs, cs) in merges if a <= r < b]
+            ink = [(c["r"] - a, c["c"]) for c in cells if a <= c["r"] < b and not c["_empty"]]
+            est = {(c["r"] - a, c["c"]): c["_est"] for c in cells if a <= c["r"] < b and not c["_empty"]}
+            over = None
             for _ in range(2):
-                ink = [(c["r"] - a, c["c"]) for c in cells if a <= c["r"] < b and not c["_empty"]]
-                sub = OCR.read_table(flat, cb, b - a, C, col_w, mm, 1 if a == 0 else 0, ink,
-                                     (R, a + 1, b) if len(chunks) > 1 else None)
+                try:
+                    sub = OCR.read_table(flat, cb, b - a, C, col_w, mm, 1 if a == 0 else 0, ink,
+                                         (R, a + 1, b) if len(chunks) > 1 or (a, b) != (0, R) else None, est, mul)
+                except OCR.Overflow as e:   # 출력이 한도에서 잘렸거나 컨텍스트 초과 예상: 행을 나눠 다시 요청한다
+                    over = e
+                    break
                 meta["calls"] += 1
                 if sub:
                     break
+            if over is not None:
+                mid = (a + b) // 2
+                while mid < b and any(mr < mid < mr + mrs for (mr, mc, mrs, mcs) in merges):
+                    mid += 1
+                if b - a > 1 and a < mid < b:
+                    OCR.STATS["split"] += 1
+                    work[:0] = [(a, mid, 1.0), (mid, b, 1.0)]
+                    continue
+                if over.kind == "truncated" and mul == 1.0:   # 더 못 나누는 한 행: 한도를 2배로 1회 재요청
+                    OCR.STATS["retry"] += 1
+                    work.insert(0, (a, b, 2.0))
+                    continue
+                sub = None
             if not sub:
                 mat = None
                 break
@@ -282,7 +331,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
                 want = [i for i, c in enumerate(rc) if not c["_empty"]]
                 if not want:
                     continue
-                res = OCR.read_row(flat, bb, [xs_mm[c["c"] + c["cs"]] - xs_mm[c["c"]] for c in rc], want)
+                res = OCR.read_row(flat, bb, [xs_mm[c["c"] + c["cs"]] - xs_mm[c["c"]] for c in rc], want, [rc[i]["_est"] for i in want])
                 meta["calls"] += 1
                 meta["row_requery"] = meta.get("row_requery", 0) + 1
                 if res and len(res) == len(rc):
@@ -292,7 +341,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
             for c in (sus[:12] if not paddle else []):  # 잉크는 있는데 빈칸 -> 이웃 포함 크롭 재질의
                 cols = [j for j in (c["c"] - 1, c["c"], c["c"] + 1) if 0 <= j < C]
                 rects = [(xs_mm[j] * PPM, c["_rect"][1], xs_mm[j + 1] * PPM, c["_rect"][3]) for j in cols]
-                t = OCR.read_neighbors(flat, rects, cols.index(c["c"]))
+                t = OCR.read_neighbors(flat, rects, cols.index(c["c"]), c.get("_est"))
                 meta["calls"] += 1
                 meta["requery"] = meta.get("requery", 0) + 1
                 if t and t.strip():
@@ -348,13 +397,16 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
     blocks = []
     if True:
         t1 = time.time()
-        for b in find_blocks(flat, fgray, tb):
+        fb = find_blocks(flat, fgray, tb)
+        bands = _bands(fb)
+        for b, band in zip(fb, bands):
             x0, y0, x1, y1 = b["bbox"]
             if (x1 - x0) < 8 * PPM or x0 > tb[2] + 15 * PPM or x1 < tb[0] - 15 * PPM:
                 flags.append({"reason": "block_dropped_outside_paper_or_tiny", "bbox_mm": [round(v / PPM, 1) for v in b["bbox"]]})
                 continue
             if ocr:
-                t = OCR.read_line_paddle(flat, b["bbox"]) if OCR.ACTIVE in ("paddle", "hybrid") else OCR.read_line(flat, b["bbox"])
+                t = OCR.read_line_paddle(flat, b["bbox"], band) if OCR.ACTIVE in ("paddle", "hybrid") else \
+                    OCR.read_line(flat, b["bbox"], band, OCR.est_tokens(flat[max(int(band[0]), 0):int(band[1]), max(int(x0) - 5, 0):int(x1) + 5]))
                 meta["calls"] += 1
             else:
                 t = "x"
@@ -363,6 +415,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
                 continue
             ty0, ty1 = tb[1] / PPM, tb[3] / PPM
             by0, by1 = y0 / PPM - 1.2, y1 / PPM + 1.2   # 글자 높이에 맞는 행 높이 확보(잘림 방지)
+            by0, by1 = max(by0, band[0] / PPM), min(by1, band[1] / PPM)   # 이웃 글줄과 겹치면 중간선에서 자른다(안 그러면 layout 이 겹친 블록을 버린다)
             if by1 > ty0 - 0.3 and y1 / PPM <= ty0 + 1:
                 by1 = ty0 - 0.3
             if by0 < ty1 + 0.3 and y0 / PPM >= ty1 - 1:
@@ -404,7 +457,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
     meta["bg_cells"] = nbg
     meta["stroke_dbg"] = [[c["r"], c["c"], round(c["_info"].get("stroke_ratio", 0), 3)] for c in cells if c["text"] and "_info" in c]
     for c in cells:
-        for k in ("_rect", "_info", "_empty", "_sz"):
+        for k in ("_rect", "_info", "_empty", "_sz", "_est"):
             c.pop(k, None)
     table = {"x_mm": xs_mm, "y_mm": ys_mm, "cells": cells, "borders": borders}
     src = {"path": source_path or path, "kind": kind, "page": 0}
@@ -413,6 +466,9 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
     for e in grid["extras"]:
         spec["flags"].append({"reason": "extra_table_ignored", "bbox": [int(a / PPM * 10) for a in e]})
     meta["vlm"] = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in OCR.STATS.items()}
+    meta["trunc"] = {"paddle": {k: OCR.PADDLE_STATS[k] for k in ("trunc", "retry_ok", "to32", "max_prompt", "max_out")},
+                     "qwen32b": {k: OCR.STATS[k] for k in ("trunc", "retry", "split", "trunc_final")}}
+    meta["call_log"] = list(OCR.CALL_LOG)
     spec["meta"].update(meta)
     spec["meta"]["sec_total"] = round(time.time() - t0, 2)
     spec["meta"]["blocks"] = [{"text": b["text"], "bbox_mm": [round(v, 1) for v in b["bbox_mm"]], "size_pt": b["size_pt"]} for b in blocks]
@@ -452,7 +508,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
         sp["meta"]["ocr_backend"] = "qwen32b"
         return sp
     OCR.ACTIVE = "paddle"
-    OCR.PADDLE_STATS.update({"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0, "fail": 0, "empty": 0, "long": 0})
+    OCR.paddle_reset()
     reason = None
     try:
         sp = _run_page(**kw)

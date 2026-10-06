@@ -13,7 +13,7 @@ if mode == "photo":
     from sheetparser import score
     c = score.content_score(spec, json.load(open("data/photos/gt_content.json")), arg)
     print(json.dumps({k: c[k] for k in c if k in ("cells_ok", "cells_total", "wrong", "block_ok", "need_ok", "need_total")}, ensure_ascii=False))
-else:
+else:  # scan | pdf
     import fitz
     norm = lambda t: re.sub(r"\s+", "", t)
     gt = collections.Counter(norm(fitz.open(arg)[0].get_text()))

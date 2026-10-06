@@ -74,6 +74,8 @@ docker run -d --name vlm --gpus all -e CUDA_VISIBLE_DEVICES=0,1 -v /home/elgrim/
 docker run -d --name paddle --gpus all -e CUDA_VISIBLE_DEVICES=0 -v /home/elgrim/models/paddle:/m -p 127.0.0.1:18003:8080 --restart on-failure:5 ghcr.io/ggml-org/llama.cpp:server-cuda -m /m/gguf/PaddleOCR-VL-1.6-GGUF.gguf --mmproj /m/gguf/PaddleOCR-VL-1.6-GGUF-mmproj.gguf -ngl 99 -c 8192 --parallel 4 --host 0.0.0.0 --port 8080 --jinja -a paddle
 ```
 
+paddle 설정(`-c 8192 --parallel 4` -> 슬롯당 2048)은 칸 크롭 프롬프트 최대 약 200토큰 + 출력 한도 512 에 충분하다(7라운드 실측). 칸이 매우 길어 `-c` 를 올릴 때는 vlm 을 먼저 띄운 상태에서 paddle 만 `-c 16384`(슬롯당 4096)로 재생성하고, 32B 와 동시 부하에서 `docker inspect`(RestartCount, OOMKilled)와 `nvidia-smi`(A4000 여유 1GB 이상)를 확인한다. 32B 설정(-c 8192, KV q8_0)은 바꾸지 않는다. 모든 모델 호출은 `finish_reason=length` 를 확인한다: paddle 은 한도 2배 재요청 후 그 칸만 32B, 32B 표는 행을 나눠 재요청하며 횟수는 `convert` 출력의 `trunc(...)` 와 spec `meta.trunc` 에 남는다. 회귀는 `tools/r7_elgrim.sh`.
+
 주의: 실측은 vlm을 먼저, paddle을 나중에 올린 순서다(반대 순서는 시험하지 않았다). 32B 컨텍스트는 8192이고 가장 긴 요청은 약 4,300 프롬프트 + 약 870 생성 토큰이다. 복구(예전 단독 설정)는 `-c 16384`, KV 옵션 제거, paddle 컨테이너 제거.
 
 ## 한계

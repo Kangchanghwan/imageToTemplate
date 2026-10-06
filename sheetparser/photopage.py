@@ -14,7 +14,7 @@ THICK_BIAS_MM = 0.2
 BG_MIN_DROP = 12
 BG_MAX_GRAY = 245      # 평탄화 후 종이=255. 이보다 확실히 어두워야 bg
 BG_MIN_UNIFORM = 0.65  # 칸 내부 균일도
-FONT = "Nanum Gothic"
+FONT = "Calibri"  # PDF 경로와 동일. 한글은 굴림으로 대체되어 원본(굴림+Calibri) 폭과 일치 (2라운드 글꼴 실험)
 
 
 def _hex(bgr):
@@ -352,6 +352,55 @@ def break_pass(flat, cells, meta):
     meta["breaks"] = nb
 
 
+FIT_PAD_PT = 3.8      # 시트 셀 좌우 패딩(2px x2 = 3pt) + 열 폭 보정(-1px 0.75pt). 실측 가용 폭은 열 폭 - 3.75pt (v6b 시트 PDF: 238.8pt 줄은 들어가고 +4.4pt 는 넘침)
+SHEET_W_RATIO = 1.075  # 시트(굴림+Calibri) 줄 폭 / 원본 잉크 폭, 같은 글자 크기 기준. v6b 실측: 같은 글 4줄에서 183.0/174.6, 218.8/208.9, 192.8/184.3, 138.4/131.8 = 1.046~1.050 (= 1.075 x 0.975)
+FIT_MAX_DOWN = 1.5    # 원본 대비 내릴 수 있는 최대 크기(pt)
+SHEET_SCALE = 0.975   # 시트 PDF 내보내기는 글자를 0.975배로 그린다 (upload.SHEET_PT_SCALE)
+
+
+def fit_pass(cells, meta):
+    """시트 글자 크기는 정수 pt(원본 크기/0.975 반올림)라 원본 크기보다 최대 약 3% 커지고, 칸 안 가장 긴 줄이 칸 폭을 꽉 채운 원본은
+    시트에서 한 줄 더 감긴다. PDF 경로처럼 줄 폭을 시트 크기로 환산해 칸 안쪽 폭을 넘으면 정수 크기를 한 단계씩 내린다(하한 원본-1.5pt).
+    줄 폭은 이미지에서 잰 줄별 잉크 폭(lbx)이다(글꼴이 원본과 같은 Calibri+굴림이라 폭 비율만 환산)."""
+    n_down, steps = 0, []
+    for c in cells:
+        i = c.get("_info") or {}
+        lb = i.get("lbx") or []
+        if not c["text"] or not lb or c["size_pt"] <= 0:
+            continue
+        s0 = c["size_pt"]
+        tw_pt = max(b - a for a, b in lb) / PPM * 72 / 25.4
+        avail = (c["_rect"][2] - c["_rect"][0]) / PPM * 72 / 25.4 - FIT_PAD_PT
+        p0 = max(1, int(s0 / SHEET_SCALE + 0.5))
+        pt = p0
+        while pt > 1 and tw_pt * SHEET_W_RATIO * pt * SHEET_SCALE / s0 > avail and pt - 1 >= s0 / SHEET_SCALE - FIT_MAX_DOWN:
+            pt -= 1
+        if pt != p0:
+            c["sheet_pt"] = pt
+            n_down += 1
+            steps.append([c["r"], c["c"], s0, p0, pt, round(tw_pt, 1), round(avail, 1)])
+    meta["fit_down"] = n_down
+    meta["fit_dbg"] = steps
+
+
+def fit_blocks(blocks, meta):
+    """표 밖 한 줄 블록도 같은 원칙: 시트 폭 추정이 블록 상자(오른쪽 여유 포함)보다 크면 정수 크기를 내린다."""
+    n = 0
+    for b in blocks:
+        x0, _, x1, _ = b["bbox_mm"]
+        s0 = b["size_pt"]
+        tw = b.get("_ink_w_mm")
+        if not tw or s0 <= 0:
+            continue
+        avail = (x1 - x0) * 72 / 25.4
+        p0 = max(1, int(s0 / SHEET_SCALE + 0.5)); pt = p0
+        while pt > 1 and tw * 72 / 25.4 * SHEET_W_RATIO * pt * SHEET_SCALE / s0 > avail and pt - 1 >= s0 / SHEET_SCALE - FIT_MAX_DOWN:
+            pt -= 1
+        if pt != p0:
+            b["sheet_pt"] = pt; n += 1
+    meta["fit_blocks_down"] = n
+
+
 def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
     """kind="pdf_scan": 입력이 이미 10px/mm 로 정규화된 용지 이미지이므로 원근 보정을 생략한다."""
     t0 = time.time()
@@ -633,7 +682,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
                            "_lay_pt": ST.size_from_ink(b["ink_h"] * (0.88 if b.get("ext_small") and ("(" in t or ")" in t) else 1.0), t),
                            "size_pt": ST.size_from_ink(b.get("ink_h2", b["ink_h"]) * _blk_corr(t, b["bold"], b.get("ink_h2", 0) / PPM), t), "bold": b["bold"], "underline": b["underline"],
                            "font": FONT, "italic": False, "color": "#000000", "h": hh, "v": "MIDDLE",
-                           "_stroke": round(b.get("stroke_ratio", 0), 3), "_line": b.get("line"), "_nc": b.get("nc", 0)})
+                           "_ink_w_mm": (x1 - x0) / PPM, "_stroke": round(b.get("stroke_ratio", 0), 3), "_line": b.get("line"), "_nc": b.get("nc", 0)})
         meta["sec_blocks"] = round(time.time() - t1, 1)
     # 같은 글줄에서 갈라진 조각(작성자 ... / (서명))은 글자 수가 가장 많은(가장 믿을 만한) 조각의 크기를 같이 쓴다. 서명 도장에 가린 조각은 높이가 부풀거나 줄어든다.
     byl = {}
@@ -656,8 +705,10 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
             mp = ST.unify_sizes([round(g["size_pt"] * 2) / 2 for g in grp])
             for g in grp:
                 g["size_pt"] = mp[round(g["size_pt"] * 2) / 2]
+    fit_blocks(blocks, meta)
     bold_pass([c for c in cells if c["text"]], HR, meta)
     align_pass([c for c in cells if c["text"]], HR)
+    fit_pass(cells, meta)
     # 제목: 표 가운데에 놓인 본문보다 확연히 큰 글줄은 굵게 (큰 글자는 잉크 두께 비율이 낮게 측정되어 굵기 판정이 늘 보통으로 나온다)
     bsz = [c["size_pt"] for c in cells if c["r"] >= HR and c["text"] and c["cs"] == 1]
     if bsz:

@@ -58,7 +58,7 @@ def pad_blocks(blocks, table, page_mm):
     out = []
     for k, b in enumerate(blocks):
         x0, y0, x1, y1 = orig[k]
-        sp = max(1, int(b.get("size_pt", 10) / SHEET_PT_SCALE + 0.5))
+        sp = max(1, int(b.get("_lay_pt", b.get("size_pt", 10)) / SHEET_PT_SCALE + 0.5))   # 행 계산은 글자 크기 추정과 분리(_lay_pt)
         need = sp * 96 / 72 * LINE_FACTOR / PX_MM
         h = y1 - y0
         # 가로: 병합된 칸은 넘친 글자를 자르므로 시트 글꼴(굵게일수록 넓음)이 더 넓어도 들어가게 정렬 방향으로 여유를 둔다

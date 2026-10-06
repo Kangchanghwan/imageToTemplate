@@ -259,3 +259,27 @@ paddle 추가분은 약 2.0GB, 32B 쪽 절감은 A4000 -2.7GB(KV 8bit + ctx 8192
 - attendance 비고 열(가운데 정렬 두 줄 글, 일부 칸이 원본에서 LEFT)은 2칸이 어긋난다(98.0%). 굵기 1칸(2줄 칸 하나)도 어긋난다.
 - Apps Script 의 하루 spreadsheet create 한도를 초과해 `v6_activity_photo` 시트를 만들지 못했다(`하루에 spreadsheet create 서비스를 너무 많이 호출했습니다`). 서식 확인은 시트 대신 spec 을 PIL 로 그린 근사 렌더(`tools/render_spec.py`, 맥 AppleSDGothicNeo)로 했다. 한도가 풀리면 `python -m sheetparser convert data/pdfs/activity_09_300dpi.png -o runs/v6 --title v6_activity_photo --verify --keep`.
 - 폭 때문에 자동 줄바꿈된 줄을 원본 줄 그대로 \n 으로 박는다. 시트 글꼴이 더 넓으면 한 줄이 칸 폭을 넘어 한 줄 더 감길 수 있다(활동 일지 근사 렌더에서는 안 나타남, 실제 시트는 미확인).
+
+## 10라운드: knou 계정 이전, 블록 크기 퇴보 수정, 테스트 시트 절감
+
+### 1. 계정 이전
+- 일반 계정(lgodl3512@gmail.com) Apps Script 한도 "Spreadsheets created 250/일"을 소진해 학교 Workspace 계정 lgodl1598@knou.ac.kr 로 웹앱 `sheetparser-writer`를 새로 배포했다. 관리자 정책 제약은 없었다(Apps Script 사용 가능, 실행 계정 본인 + 액세스 모든 사용자 선택 가능, OAuth 동의 화면에 차단 없음). 새 무작위 API_KEY 를 Script Properties 에 넣었다.
+- `.env`: 이전 값은 `SHEETS_WEBAPP_URL_GMAIL`/`SHEETS_WEBAPP_KEY_GMAIL` 로 보존, 새 값이 `SHEETS_WEBAPP_URL`/`SHEETS_WEBAPP_KEY`. elgrim 에도 동기화.
+- 검증(`tools/r10_check_account.py`, sample_spec): create 6.2초 -> PDF 내보내기 -> list -> delete 정상. PDF(A4, 595x842pt) 열 pt/px = 0.75, 0.75, 0.75, 0.754 로 기존 실측((px+1) x 0.75pt)과 같고, 행 선 간격은 첫 행 15.75pt(21px) 등 기존과 같은 범위(선 굵기 때문에 +-0.75pt)였다. 보정 계수 변경 없음.
+
+### 2. 블록 크기 퇴보 수정
+- 원인: `find_blocks` 의 글자 높이 `ink_h` 는 글줄을 이루는 연결 조각 높이의 70 분위였다. 굴림 큰 제목처럼 자모가 떨어진 글줄은 조각이 글자보다 훨씬 작아 크기가 낮게(meal 제목 19.5 -> 13.5pt), 숫자가 섞인 줄도 낮게(11.5 -> 9, 9.5 -> 8) 나왔다. 8라운드의 위/아랫 끝 분위 방식은 이 높이를 그대로 레이아웃(`layout.pad_blocks` 행 높이)에 넘겨 form_attendance 격자를 바꿨다.
+- 수정: 크기 추정은 글줄 범위(큰 덩어리 제외 후 위~아래, `ink_h2`)로 하고, 괄호 줄은 x0.88, 굵은 글자/5.5mm 이상 큰 제목은 /1.07 로 보정한다. 레이아웃 행 높이는 이전 값(`_lay_pt`)을 그대로 써서 크기 추정과 격자 계산을 분리했다. 6개 입력과 7장 사진/합성 bench 의 행/열/병합/텍스트 지표는 수정 전후 로그가 완전히 같다(form_attendance 24행 유지).
+
+| 지표(6개 입력) | 9라운드(수정 전) | 10라운드 |
+|---|---|---|
+| 표 밖 블록 크기(+-1pt) | 6/20 = 30% | 19/20 = 95% |
+| 표 칸 서식 지표(h/v/굵게/줄 수/크기/배경/테두리) | 변화 없음 | 변화 없음 |
+
+남은 1개는 meal 사진의 "(서명)"이 앞 줄과 한 덩어리로 읽혀 짝이 안 되는 경우다.
+
+### 3. 테스트 시트 절감
+`tools/run_r10.sh <접두>` 는 시트를 만들지 않고(`convert --no-upload`) 채점한다. `--sheets` 는 대표 2개(v6_activity_photo, v7_sched_09)만 만들고 나머지는 `cleanup.py` 로 지운다. 이번 라운드 시트 생성은 sample_spec 점검 1 + v6 2 + v7 1 = 4개(중복 1개 정리).
+
+### 한계
+- 실제 시트 글꼴에서는 긴 글이 원본보다 한 줄 더 감겨 일부 행에서 글이 잘린다(activity 사진 6, 7번 행). 글꼴 폭 차이이며 이번 라운드에서 고치지 않았다.

@@ -22,6 +22,27 @@ def _hex(bgr):
     return "#%02x%02x%02x" % (r, g, b)
 
 
+def _blk_corr(t, bold, ink_mm=0.0):
+    """글줄 범위로 크기를 잴 때의 보정: 괄호는 글자 위아래로 약 12% 튀어나오고(0.88), 굵은 글자(굴림 가짜 굵게)는 획이 두꺼워져 약 7% 커 보인다."""
+    if "(" in t or ")" in t:
+        return 0.88
+    return 1 / 1.07 if (bold or ink_mm >= 5.5) else 1.0   # 5.5mm 이상(약 17pt 이상)의 큰 제목은 굵은 글꼴로 본다(굵기 판정이 놓쳐도 크기는 같은 보정)
+
+
+def _syllable_h(bx):
+    """같은 글자에 속한 조각(가로로 겹치는 자모)을 합쳐 글자 한 칸의 높이를 잰다. 자모가 떨어진 굴림 큰 제목에서
+    조각 높이의 분위수는 글자보다 훨씬 작아진다. 합친 높이의 75 분위를 쓴다(괄호 같은 키 큰 조각은 소수라 영향이 작다)."""
+    iv = sorted([(int(r[0]), int(r[0] + r[2]), int(r[1]), int(r[1] + r[3])) for r in bx])
+    merged = []
+    for x0, x1, y0, y1 in iv:
+        if merged and x0 < merged[-1][1] - 1:
+            m = merged[-1]; merged[-1] = [m[0], max(m[1], x1), min(m[2], y0), max(m[3], y1)]
+        else:
+            merged.append([x0, x1, y0, y1])
+    hs = np.array([m[3] - m[2] for m in merged], float)
+    return float(np.percentile(hs, 75))
+
+
 def find_blocks(img, fgray, tb):
     """표 밖 잉크에서 텍스트 줄 bbox(px) 찾기. tb=(x0,y0,x1,y1) 표 외곽 px."""
     H, W = fgray.shape
@@ -97,6 +118,7 @@ def find_blocks(img, fgray, tb):
             tall = (hs >= 0.6 * p90) & (hs <= 1.5 * p90)
             top = int(bx[tall, 1].min()); bot = int((bx[tall, 1] + bx[tall, 3]).max())
             core_h = float(np.percentile(hs[tall], 70))   # 괄호 등으로 부풀지 않게 글자 하나의 높이
+            core_h2 = float(bot - top)   # 글자 크기 추정 전용: 글줄의 위~아래 범위(레이아웃 행 계산에는 core_h 만 쓴다). 자모가 떨어진 큰 제목도 조각 높이가 아닌 글줄 범위를 쓴다
             xa, xb = int(bx_all[:, 0].min()), int((bx_all[:, 0] + bx_all[:, 2]).max())   # 읽기 범위는 도장 덩어리까지 포함 (가려진 글자도 읽어 본다)
             ya, yb = int(bx_all[:, 1].min()), int((bx_all[:, 1] + bx_all[:, 3]).max())
             sub = np.isin(lab[ya:yb, xa:xb], ids).astype(np.uint8)
@@ -106,7 +128,7 @@ def find_blocks(img, fgray, tb):
             ih = bot - top
             ul = any(t[2] >= 0.6 * (xb - xa) and t[0] >= xa - 3 * PPM and t[0] + t[2] <= xb + 3 * PPM
                      and 0 <= t[1] - bot <= 4 * PPM for t in thin)
-            out.append({"bbox": (xa, ya, xb, yb), "ink_h": core_h, "ext_small": False, "line": k, "nc": len(bx), "bold": bool(ih and stroke / ih > 0.135), "underline": ul,
+            out.append({"bbox": (xa, ya, xb, yb), "ink_h": core_h, "ink_h2": core_h2, "ext_small": False, "line": k, "nc": len(bx), "bold": bool(ih and stroke / ih > 0.135), "underline": ul,
                         "stroke_ratio": float(stroke / ih) if ih else 0.0})
     merged = True
     while merged:
@@ -120,7 +142,7 @@ def find_blocks(img, fgray, tb):
                 if ov >= 0.6 * min(ay1 - ay0, by1 - by0) and gap <= min(20 * PPM, 2.0 * min(a['ink_h'], b['ink_h']) / 0.88):
                     bb = (min(a["bbox"][0], b["bbox"][0]), min(ay0, by0), max(a["bbox"][2], b["bbox"][2]), max(ay1, by1))
                     big = a if (a["bbox"][3] - a["bbox"][1]) >= (b["bbox"][3] - b["bbox"][1]) else b
-                    out[i] = {"bbox": bb, "ink_h": big["ink_h"], "ext_small": big.get("ext_small"), "line": big.get("line"), "nc": a.get("nc", 0) + b.get("nc", 0), "bold": big["bold"], "underline": a["underline"] or b["underline"],
+                    out[i] = {"bbox": bb, "ink_h": big["ink_h"], "ink_h2": big.get("ink_h2", big["ink_h"]), "ext_small": big.get("ext_small"), "line": big.get("line"), "nc": a.get("nc", 0) + b.get("nc", 0), "bold": big["bold"], "underline": a["underline"] or b["underline"],
                               "stroke_ratio": big.get("stroke_ratio", 0.0)}
                     del out[j]; merged = True
                     break
@@ -608,7 +630,8 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
             if abs((x0 + x1) / 2 / PPM - (tx0 + tx1) / 2) < 0.06 * (tx1 - tx0) and x0 / PPM > tx0 - 3 and x1 / PPM < tx1 + 3:
                 bb[0], bb[2], hh = tx0, tx1, "CENTER"   # 표 가운데 제목: 표 전체 폭으로 병합 + 가운데 정렬 (넘침/잘림 방지)
             blocks.append({"bbox_mm": bb, "text": t.strip(),
-                           "size_pt": ST.size_from_ink(b["ink_h"] * (0.88 if b.get("ext_small") and ("(" in t or ")" in t) else 1.0), t), "bold": b["bold"], "underline": b["underline"],
+                           "_lay_pt": ST.size_from_ink(b["ink_h"] * (0.88 if b.get("ext_small") and ("(" in t or ")" in t) else 1.0), t),
+                           "size_pt": ST.size_from_ink(b.get("ink_h2", b["ink_h"]) * _blk_corr(t, b["bold"], b.get("ink_h2", 0) / PPM), t), "bold": b["bold"], "underline": b["underline"],
                            "font": FONT, "italic": False, "color": "#000000", "h": hh, "v": "MIDDLE",
                            "_stroke": round(b.get("stroke_ratio", 0), 3), "_line": b.get("line"), "_nc": b.get("nc", 0)})
         meta["sec_blocks"] = round(time.time() - t1, 1)
@@ -621,7 +644,7 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
         if len(grp) >= 2:
             ref = max(grp, key=lambda b: b["_nc"])
             for b in grp:
-                b["size_pt"] = ref["size_pt"]
+                b["size_pt"] = ref["size_pt"]; b["_lay_pt"] = ref["_lay_pt"]
             grp.sort(key=lambda b: b["bbox_mm"][0])
             last = grp[-1]
             tx0, tx1 = tb[0] / PPM, tb[2] / PPM

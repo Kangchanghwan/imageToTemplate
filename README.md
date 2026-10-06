@@ -34,7 +34,7 @@ tools/pull.sh                      # elgrim runs/ 를 맥으로 가져오기
 tools/dk.sh tools/cleanup.py --keep-prefix v3_   # sheetparser-poc 폴더에서 v3_ 로 시작하지 않는 시트 삭제
 ```
 
-`.env` (git 제외)에 `SHEETS_WEBAPP_URL`, `SHEETS_WEBAPP_KEY`가 필요하다. Apps Script는 `apps_script/Code.gs`를 붙여 웹 앱으로 배포한다(실행 계정 본인, 접근 모든 사용자). 서비스는 Sheets(v4) 고급 서비스를 켠다.
+`.env` (git 제외)에 `SHEETS_WEBAPP_URL`, `SHEETS_WEBAPP_KEY`가 필요하다(10라운드부터 학교 Workspace 계정 lgodl1598@knou.ac.kr 의 웹앱. 이전 gmail 계정 값은 `SHEETS_WEBAPP_URL_GMAIL`, `SHEETS_WEBAPP_KEY_GMAIL`로 보존). Apps Script는 `apps_script/Code.gs`를 붙여 웹 앱으로 배포한다(실행 계정 본인, 접근 모든 사용자). 서비스는 Sheets(v4) 고급 서비스를 켠다.
 
 ```sh
 python -m sheetparser convert <input.pdf|jpg|png> [-o runs/convert/<name>] [--title T] [--verify] [--keep|--delete]
@@ -86,3 +86,9 @@ paddle 설정(`-c 8192 --parallel 4` -> 슬롯당 2048)은 칸 크롭 프롬프�
 - 시트 쪽 글꼴(Calibri/Nanum Gothic 대체)이 원본(굴림 등)과 달라 글줄 폭이 조금 다르다. 좁은 열의 머리글은 한글이 줄바꿈될 수 있다.
 - 병합 셀 안 글자는 넘치지 않고 잘리므로 가로 여유를 추정으로 둔다. 회색 계열 배경 외의 복잡한 배경, 이중선 일부, 여러 표가 있는 페이지는 미지원(`extra_table_ignored`).
 - Apps Script 웹앱이 가끔 404/상태 메시지로 응답한다. `upload.call`이 재시도하지만 create가 중복 생성될 수 있어 `tools/cleanup.py`가 같은 이름 중 최신만 남긴다.
+
+## 시트 생성 한도와 테스트 원칙
+
+Apps Script 의 "Spreadsheets created" 한도는 일반 구글 계정 250개/일, Workspace 계정 3,200개/일이다(Workspace 3,200 은 구글 공식 한도표 기준이며 실측하지 않았다). 한도를 넘으면 `하루에 spreadsheet create 서비스를 너무 많이 호출했습니다` 로 create 가 막힌다. 9라운드까지 회귀를 돌릴 때마다 시트를 입력당 하나씩 만들어 일반 계정 한도를 하루 만에 소진했다.
+
+원칙: 회귀는 시트를 만들지 않고 spec 단계에서 채점한다(`tools/run_r10.sh <접두>`, 내부적으로 `convert --no-upload`). 실제 시트 생성과 PDF 검증은 `tools/run_r10.sh <접두> --sheets` 일 때만, 대표 2개(`v6_activity_photo` = activity 사진, `v7_sched_09`)에 한해 한다. 끝에 `tools/cleanup.py` 로 나머지 시트를 지운다.

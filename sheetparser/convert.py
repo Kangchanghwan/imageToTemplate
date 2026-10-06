@@ -38,7 +38,7 @@ def _render_scan(path, outdir, name):
     return cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
 
 
-def convert(path, outdir=None, title=None, delete=False, verify_on=False):
+def convert(path, outdir=None, title=None, delete=False, verify_on=False, no_upload=False):
     from . import pipeline, photopage, score, verify, upload as UP
     t0 = time.time()
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -57,7 +57,9 @@ def convert(path, outdir=None, title=None, delete=False, verify_on=False):
     t_spec = time.time() - t0
     spec_path = os.path.join(outdir, title + ".json")
     json.dump(spec, open(spec_path, "w"), ensure_ascii=False, indent=1)
-    if verify_on:
+    if no_upload:   # 시트 생성 없음(Apps Script 일일 한도 절약)
+        res = {}
+    elif verify_on:
         res = verify.main(spec_path, outdir, delete)
     else:   # 업로드 1회(create)만. 시트 PDF 내보내기/겹쳐 채점 없음
         r = UP.upload(spec, title)
@@ -69,7 +71,7 @@ def convert(path, outdir=None, title=None, delete=False, verify_on=False):
     summ = {"input": path, "kind": kind, "title": title, "url": res.get("url"), "sec_spec": round(t_spec, 1),
             "sec_total": round(time.time() - t0, 1), "spec": spec_path,
             "sheet_pdf": os.path.join(outdir, title + "_sheet.pdf"), "side_png": os.path.join(outdir, title + "_side.png"),
-            "deleted": bool(delete), "verified": bool(verify_on),
+            "deleted": bool(delete), "verified": bool(verify_on) and not no_upload,
             "sec_upload": round(time.time() - t0 - t_spec, 1), "vlm": spec.get("meta", {}).get("vlm"),
             "calls": spec.get("meta", {}).get("calls"), "trunc": spec.get("meta", {}).get("trunc"),
             "ocr_backend": spec.get("meta", {}).get("ocr_backend"), "auto_fallback": spec.get("meta", {}).get("auto_fallback")}
@@ -87,13 +89,13 @@ def convert(path, outdir=None, title=None, delete=False, verify_on=False):
     summ["metrics"] = {k: res[k] for k in keys if k in res}
     json.dump(summ, open(os.path.join(outdir, "convert.json"), "w"), ensure_ascii=False, indent=1)
     print("== %s [%s] %.1fs" % (title, kind, summ["sec_total"]))
-    print("URL:", summ["url"])
+    print("URL:", summ["url"] if not no_upload else "(no-upload)")
     for k, v in summ["metrics"].items():
         print("  %s: %s" % (k, v))
     for k in ("cell_acc", "cells_ok", "cells_total", "content_wrong", "block_text_ok"):
         if k in summ:
             print("  %s: %s" % (k, summ[k]))
-    if verify_on:
+    if verify_on and not no_upload:
         print("  side:", summ["side_png"])
     print("  sec_spec: %s sec_upload: %s vlm: %s" % (summ["sec_spec"], summ["sec_upload"], summ["vlm"]))
     print("  ocr_backend: %s auto_fallback: %s" % (summ["ocr_backend"], summ["auto_fallback"]))

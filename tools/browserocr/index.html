@@ -1,0 +1,135 @@
+<!doctype html><meta charset="utf-8"><title>browser OCR bench</title>
+<pre id="out">ready</pre>
+<script type="module">
+// 사용: window.bench({engine:'ort'|'tess', ep:'wasm'|'webgpu', threads:N, set:'sched_09'|'activity_09', mode:'split'|'det', tess:'best'|'fast', psm:6|7})
+const ORT_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
+const TESS_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js';
+const M = '/tmp/bro_models/', C = '/tmp/bro_crops/';
+let ort = null, dict = null, DET = 'det_v5.onnx';
+const sess = {};
+const now = () => performance.now();
+async function loadOrt(ep, threads) {
+  if (!ort) {
+    ort = await import(ORT_URL + (ep === 'webgpu' ? 'ort.webgpu.min.mjs' : 'ort.wasm.min.mjs'));
+    ort.env.wasm.wasmPaths = ORT_URL;
+  }
+  ort.env.wasm.numThreads = threads;
+  return ort;
+}
+async function getSess(name, ep) {
+  const k = name + ep;
+  if (sess[k]) return sess[k];
+  const t0 = now();
+  const buf = await (await fetch(M + name)).arrayBuffer();
+  const t1 = now();
+  sess[k] = await ort.InferenceSession.create(buf, { executionProviders: [ep], graphOptimizationLevel: 'all' });
+  sess[k]._load = { fetch_ms: t1 - t0, create_ms: now() - t1, bytes: buf.byteLength };
+  return sess[k];
+}
+async function loadDict() {
+  if (!dict) dict = ['blank', ...(await (await fetch(M + 'dict_ko.txt')).text()).split('\n').filter((l, i, a) => i < a.length - (a[a.length - 1] === '' ? 1 : 0)), ' '];
+  return dict;
+}
+function toCanvas(bmp) { const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height; c.getContext('2d').drawImage(bmp, 0, 0); return c; }
+function gray(c) { const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; const g = new Float32Array(c.width * c.height); for (let i = 0; i < g.length; i++) g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]; return g; }
+function pct(a, p) { const s = Float32Array.from(a).sort(); return s[Math.floor((s.length - 1) * p)]; }
+function splitLines(c) {   // python split_lines 와 같은 규칙 (가로 투영)
+  const w = c.width, h = c.height, g = gray(c), bg = pct(g, 0.8), rows = new Uint8Array(h);
+  for (let y = 0; y < h; y++) { let s = 0; for (let x = 0; x < w; x++) if (bg - g[y * w + x] > 50) s++; rows[y] = s > 0 ? 1 : 0; }
+  let runs = [], s = -1;
+  for (let y = 0; y <= h; y++) { if (y < h && rows[y]) { if (s < 0) s = y; } else if (s >= 0) { runs.push([s, y - 1]); s = -1; } }
+  if (!runs.length) return [[0, h - 1]];
+  const mh = Math.max(...runs.map(r => r[1] - r[0] + 1)); const mg = [];
+  for (const r of runs) { if (mg.length && r[0] - mg[mg.length - 1][1] - 1 < 0.25 * mh) mg[mg.length - 1][1] = r[1]; else mg.push([...r]); }
+  const o = mg.filter(r => r[1] - r[0] + 1 >= 3).map(r => [Math.max(r[0] - 4, 0), Math.min(r[1] + 4, h - 1)]);
+  return o.length ? o : [[0, h - 1]];
+}
+function sub(c, x0, y0, x1, y1) { const o = document.createElement('canvas'); o.width = Math.max(x1 - x0, 1); o.height = Math.max(y1 - y0, 1); o.getContext('2d').drawImage(c, x0, y0, o.width, o.height, 0, 0, o.width, o.height); return o; }
+function tensorBGR(c, W, H, norm) {   // 크롭을 WxH 로 리사이즈, BGR CHW float
+  const o = document.createElement('canvas'); o.width = W; o.height = H; const x = o.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(c, 0, 0, W, H);
+  const d = x.getImageData(0, 0, W, H).data, t = new Float32Array(3 * W * H), n = W * H;
+  for (let i = 0; i < n; i++) { const r = d[4 * i] / 255, g = d[4 * i + 1] / 255, b = d[4 * i + 2] / 255; const v = [b, g, r];
+    for (let k = 0; k < 3; k++) t[k * n + i] = norm ? (v[k] - norm.m[k]) / norm.s[k] : (v[k] - 0.5) / 0.5; }
+  return t;
+}
+async function recLine(c, ep) {
+  const D = await loadDict(), s = await getSess('rec_ko.onnx', ep);
+  const H = 48, W = Math.min(Math.max(Math.ceil(H * c.width / c.height), 8), 3200);
+  const inp = new ort.Tensor('float32', tensorBGR(c, W, H), [1, 3, H, W]);
+  const out = (await s.run({ [s.inputNames[0]]: inp }))[s.outputNames[0]];
+  const [, T, K] = out.dims, a = out.data; let txt = '', prev = 0;
+  for (let t = 0; t < T; t++) { let bi = 0, bv = -1; for (let k = 0; k < K; k++) { const v = a[t * K + k]; if (v > bv) { bv = v; bi = k; } } if (bi !== 0 && bi !== prev && bi < D.length) txt += D[bi]; prev = bi; }
+  return txt;
+}
+async function detBoxes(c, ep) {
+  const s = await getSess(DET, ep); const h = c.height, w = c.width; let sc = 1;
+  if (Math.min(h, w) < 64) sc = 64 / Math.min(h, w); if (Math.max(h, w) * sc > 960) sc = 960 / Math.max(h, w);
+  const nh = Math.max(32, Math.round(h * sc / 32) * 32), nw = Math.max(32, Math.round(w * sc / 32) * 32);
+  const inp = new ort.Tensor('float32', tensorBGR(c, nw, nh, { m: [0.485, 0.456, 0.406], s: [0.229, 0.224, 0.225] }), [1, 3, nh, nw]);
+  const pm = (await s.run({ [s.inputNames[0]]: inp }))[s.outputNames[0]].data;
+  const seen = new Uint8Array(nh * nw), boxes = [];
+  for (let i = 0; i < nh * nw; i++) { if (seen[i] || pm[i] <= 0.3) continue; const st = [i]; seen[i] = 1; let x0 = nw, y0 = nh, x1 = 0, y1 = 0, sum = 0, cnt = 0;
+    while (st.length) { const p = st.pop(), y = (p / nw) | 0, x = p - y * nw; sum += pm[p]; cnt++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const yy = y + dy, xx = x + dx; if (yy < 0 || xx < 0 || yy >= nh || xx >= nw) continue; const q = yy * nw + xx; if (!seen[q] && pm[q] > 0.3) { seen[q] = 1; st.push(q); } } }
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1; if (bw < 3 || bh < 3 || sum / cnt < 0.5) continue; const d = Math.round(bw * bh * 1.5 / (2 * (bw + bh)));
+    boxes.push([Math.max(Math.floor((x0 - d) / nw * w), 0), Math.max(Math.floor((y0 - d) / nh * h), 0), Math.min(Math.floor((x1 + 1 + d) / nw * w), w), Math.min(Math.floor((y1 + 1 + d) / nh * h), h)]); }
+  return boxes;
+}
+async function ocrOrt(c, o) {
+  if (o.mode === 'det') {
+    const bx = (await detBoxes(c, o.ep)).sort((a, b) => (a[1] + a[3]) - (b[1] + b[3])), lines = [];
+    for (const b of bx) { const L = lines.find(L => Math.min(L[0][3], b[3]) - Math.max(L[0][1], b[1]) > 0.5 * Math.min(L[0][3] - L[0][1], b[3] - b[1])); if (L) L.push(b); else lines.push([b]); }
+    const out = [];
+    for (const L of lines.sort((a, b) => a[0][1] - b[0][1])) { const p = []; for (const b of L.sort((a, b) => a[0] - b[0])) { const t = await recLine(sub(c, b[0], b[1], b[2], b[3]), o.ep); if (t) p.push(t); } out.push(p.join(' ')); }
+    let t = out.join(' ');
+    if (!t) { const o2 = []; for (const [a, b] of splitLines(c)) o2.push(await recLine(sub(c, 0, a, c.width, b + 1), o.ep)); t = o2.filter(Boolean).join(' '); }
+    return t;
+  }
+  const o2 = []; for (const [a, b] of splitLines(c)) o2.push(await recLine(sub(c, 0, a, c.width, b + 1), o.ep));
+  return o2.filter(Boolean).join(' ');
+}
+let tessW = null;
+async function loadTess(o) {
+  if (!window.Tesseract) await new Promise((r, j) => { const s = document.createElement('script'); s.src = TESS_URL; s.onload = r; s.onerror = j; document.head.appendChild(s); });
+  const t0 = now();
+  tessW = await Tesseract.createWorker('kor', 1, { langPath: M + o.tess, gzip: false, cacheMethod: 'none', logger: () => {} });
+  await tessW.setParameters({ tessedit_pageseg_mode: String(o.psm) });
+  return now() - t0;
+}
+window.bench = async function (o) {
+  o = Object.assign({ det: 'det_v5.onnx', engine: 'ort', ep: 'wasm', threads: 4, set: 'sched_09', mode: 'det', tess: 'best', psm: 6, reps: 1 }, o);
+  DET = o.det; const res = { opts: o, crossOriginIsolated, hwc: navigator.hardwareConcurrency, ua: navigator.userAgent.slice(-40) };
+  const man = await (await fetch(C + o.set + '/manifest.json')).json();
+  const tc = now(); const bmps = [];
+  for (const m of man) bmps.push(toCanvas(await createImageBitmap(await (await fetch(C + o.set + '/' + String(m.i).padStart(3, '0') + '.png')).blob())));
+  res.crops = man.length; res.crops_fetch_ms = Math.round(now() - tc);
+  let run;
+  const tl = now();
+  if (o.engine === 'ort') {
+    await loadOrt(o.ep, o.threads); await loadDict();
+    const sr = await getSess('rec_ko.onnx', o.ep); if (o.mode === 'det') await getSess(DET, o.ep);
+    res.model_load_ms = Math.round(now() - tl); res.model_bytes = sr._load.bytes + (o.mode === 'det' ? sess[DET + o.ep]._load.bytes : 0);
+    res.rec_create_ms = Math.round(sr._load.create_ms);
+    run = c => ocrOrt(c, o);
+    res.ep_used = o.ep;
+  } else {
+    res.model_load_ms = Math.round(await loadTess(o));
+    res.model_bytes = o.tess === 'best' ? 12528128 : 1677415;
+    run = async c => { const x = document.createElement('canvas'); x.width = c.width + 20; x.height = c.height + 20; const g = x.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, x.width, x.height); g.drawImage(c, 10, 10); return (await tessW.recognize(x)).data.text.replace(/\s+/g, ' ').trim(); };
+  }
+  await run(bmps[0]);   // 워밍업 1칸
+  const all = [];
+  for (let r = 0; r < o.reps; r++) {
+    const t0 = now(), texts = [], per = [];
+    for (let i = 0; i < bmps.length; i++) { const a = now(); texts.push(await run(bmps[i])); per.push(now() - a); }
+    all.push({ total_ms: Math.round(now() - t0), per_p50: Math.round(pct(per, 0.5)), per_p95: Math.round(pct(per, 0.95)), texts });
+  }
+  const best = all.reduce((a, b) => a.total_ms <= b.total_ms ? a : b);
+  res.total_ms = best.total_ms; res.all_total_ms = all.map(a => a.total_ms); res.per_p50 = best.per_p50; res.per_p95 = best.per_p95;
+  const ws = s => s.replace(/\s+/g, ''); let eq = 0; best.texts.forEach((t, i) => { if (ws(t) === ws(man[i].py_text)) eq++; });
+  res.same_as_python = eq; res.sample = best.texts.slice(0, 6);
+  if (tessW) { await tessW.terminate(); tessW = null; }
+  document.getElementById('out').textContent = JSON.stringify(res);
+  return res;
+};
+</script>

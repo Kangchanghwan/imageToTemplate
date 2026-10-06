@@ -25,3 +25,11 @@ export function bgrToMat(img) {
 export function matToBgr(m) {
   return { w: m.cols, h: m.rows, data: new Uint8Array(m.data) };
 }
+
+// Mat.clone() 은 ROI 의 step(부모 폭)을 유지한 비연속 Mat 을 돌려준다(OpenCV.js 5.0.0 실측). 선형 인덱싱을 쓰려면 copyTo 로 복사해야 한다.
+export function copyMat(m) {
+  const cv = getCv();
+  const out = new cv.Mat();
+  m.copyTo(out);
+  return out;
+}

@@ -71,7 +71,7 @@ for (const name of names) {
   const cellCmp = { rc: diff(P.cells.map((c) => [c.r, c.c, c.rs, c.cs]), J.cells.map((c) => [c.r, c.c, c.rs, c.cs])), rect: diff(P.cells.map((c) => c._rect), J.cells.map((c) => c._rect)), empty: diff(P.cells.map((c) => c._empty), J.cells.map((c) => c._empty)) };
   const pick = (cells, ks) => cells.map((c) => Object.fromEntries(ks.filter((k) => k in c.info).map((k) => [k, c.info[k]])));
   const intKeys = ['h', 'v', 'lbands', 'lbx', 'gl', 'gr', 'cw', 'nlines', 'size_pt', 'bold', 'ink_h', 'ink_bbox'];
-  const fltKeys = ['med', 'uni', 'fill', 'stroke_ratio', 'bgr'];
+  const fltKeys = ['med', 'uni', 'fill', 'stroke_ratio', 'bgr', 'hth'];
   cellCmp.info = diff(pick(P.cells, intKeys), pick(J.cells, intKeys));
   cellCmp.infoF = diff(pick(P.cells, fltKeys), pick(J.cells, fltKeys));
   // 경계 스타일(두께-0.2 보정 후 style_name) 불일치 수

@@ -1,6 +1,6 @@
 // photopage._run_page 앞부분(입력 -> 보정 -> 격자 -> 칸 생성, OCR 없음) 이식.
 // 입력: img0 = BGR Mat (photo: 원본 디코드, pdf_scan: 이미 10px/mm 로 줄인 용지 이미지)
-import { getCv, tracker } from './cv.js';
+import { getCv, tracker, copyMat } from './cv.js';
 import * as PP from './preprocess.js';
 import * as G from './grid.js';
 import * as ST from './style.js';
@@ -20,14 +20,17 @@ export function scanNormalize(img300, dpi = 300) {
 const now = () => performance.now();
 
 // 반환: { info(JSON 가능 덤프), rect(Mat), flat(Mat), mask, hb, vb (Mat), timing }  — Mat 은 호출자가 delete
-export function runFront(img0, kind = 'photo') {
+export function runFront(img0, kind = 'photo', fixed = null) {
   const cv = getCv();
   const timing = {};
   let t = now();
   const lap = (k) => { const n = now(); timing[k] = Math.round((n - t) * 10) / 10; t = n; };
   const info = { kind };
   let img, pgMm, flags;
-  const owned = [];
+  if (fixed) {   // 모드 (i): Python 이 만든 보정 이미지/페이지 mm/flags 를 그대로 사용 (rectify, table_rectify 생략)
+    img = copyMat(fixed.img); pgMm = fixed.pgMm; flags = fixed.flags.map((f) => ({ ...f }));
+    info.rectify = { shape: [img.rows, img.cols, 3], pg_mm: pgMm, flags: flags.map((f) => ({ ...f })) };
+  } else {
   if (kind === 'photo') {
     const fp = PP.findPaper(img0);
     info.find_paper = fp === null ? null : { quad: fp.quad, touch: fp.touch };
@@ -36,7 +39,7 @@ export function runFront(img0, kind = 'photo') {
     img = r.img; pgMm = r.pageMm; flags = r.flags;
     lap('rectify');
   } else {
-    img = img0.clone();
+    img = copyMat(img0);
     pgMm = [pyRoundN(img0.cols / PPM, 1), pyRoundN(img0.rows / PPM, 1)];
     flags = [{ reason: 'pdf_scan_no_perspective' }];
   }
@@ -50,13 +53,14 @@ export function runFront(img0, kind = 'photo') {
     info.table_rectify = { ok: tr.ok, origin: tr.origin, shape: [img.rows, img.cols, 3] };
     lap('table_rectify');
   }
+  }
   info.rect_shape = [img.rows, img.cols, 3];
   info.pg_mm = pgMm;
   const mask = PP.lineMask(img);
   lap('line_mask');
   const { hb, vb } = G.lineMasks(mask, PPM);
   lap('line_masks');
-  const out = { info, rect: img, mask, hb, vb, timing };
+  const out = { info, rect: img, mask, hb, vb, timing, flags, pgMm };
   let grid;
   try { grid = G.buildGrid(mask, PPM); } catch (e) { info.error = 'grid_failed:' + e.message; return out; }
   lap('build_grid');
@@ -86,8 +90,9 @@ export function runFront(img0, kind = 'photo') {
     const { empty, ...rest } = inf;
     cells.push({ r, c, rs, cs, _rect: rect, _empty: !!empty, info: rest });
   }
-  fgray.delete();
+  out.fgray = fgray;
   info.cells = cells;
+  out.grid = grid; out.tb = tb; out.cellsRaw = cells;
   info.merges = cells.filter((c) => c.rs > 1 || c.cs > 1).map((c) => [c.r, c.c, c.rs, c.cs]);
   lap('analyze_cells');
   return out;

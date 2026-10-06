@@ -125,3 +125,26 @@ export function lstsq(A, y) {
   }
   return x;
 }
+
+// uint8 데이터의 np.percentile(선형): 히스토그램으로 k 번째 값을 구해 같은 보간식 적용 (float64 결과)
+export function percentileU8(hist, n, q) {
+  const vi = (n - 1) * (q / 100);
+  const prev = Math.floor(vi);
+  const next = Math.min(prev + 1, n - 1);
+  const t = vi - prev;
+  const kth = (k) => { let c = 0; for (let v = 0; v < 256; v++) { c += hist[v]; if (c > k) return v; } return 255; };
+  const a = kth(prev), b = kth(next);
+  const d = b - a;
+  return t >= 0.5 ? b - d * (1 - t) : a + d * t;
+}
+export function histU8(arr) {
+  const h = new Int32Array(256);
+  for (let i = 0; i < arr.length; i++) h[arr[i]]++;
+  return h;
+}
+// 정수/실수 배열의 np.percentile (정렬 필요 없음)
+export function percentile(arr, q) {
+  const s = Float64Array.from(arr).sort();
+  return percentileSorted(s, q);
+}
+export const f32 = Math.fround;

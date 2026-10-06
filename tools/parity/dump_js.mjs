@@ -48,7 +48,7 @@ for (const it of manifest.inputs) {
     const r = runFront(input, it.kind);
     const ms = performance.now() - t0;
     if (best === null || ms < best) best = ms;
-    if (rep < reps - 1) { for (const k of ['rect', 'flat', 'mask', 'hb', 'vb']) r[k] && r[k].delete(); src.delete(); norm && norm.delete(); continue; }
+    if (rep < reps - 1) { for (const k of ['rect', 'flat', 'fgray', 'mask', 'hb', 'vb']) r[k] && r[k].delete(); src.delete(); norm && norm.delete(); continue; }
     last = { r, src, norm, ms };
   }
   const { r, src, norm } = last;
@@ -64,6 +64,6 @@ for (const it of manifest.inputs) {
   writePngBgr(path.join(outdir, 'js', it.name + '_rect.png'), r.rect);
   if (r.flat) writePngBgr(path.join(outdir, 'js', it.name + '_flat.png'), r.flat);
   console.log(it.name, it.kind, d.rect_shape.join('x'), d.error || '', Math.round(best) + 'ms');
-  for (const k of ['rect', 'flat', 'mask', 'hb', 'vb']) r[k] && r[k].delete();
+  for (const k of ['rect', 'flat', 'fgray', 'mask', 'hb', 'vb']) r[k] && r[k].delete();
   src.delete(); norm && norm.delete();
 }

@@ -1,7 +1,7 @@
 // sheetparser/style.py 이식 (1단계 범위): style_name, analyze (empty/med/uni/bgr/정렬/글줄 띠/size_pt/stroke 굵기).
 // hangul_thickness(hth) 는 2단계(굵기 판정 단계)에서 이식한다.
 import { getCv, tracker } from './cv.js';
-import { pyRound, median, medianU8 } from './npy.js';
+import { pyRound, median, medianU8, percentileU8, histU8, f32 } from './npy.js';
 
 export const PPM = 10;
 
@@ -119,6 +119,7 @@ export function analyze(img, gray, rect, inset = 7) {
     }
     res.gl = gl; res.gr = gr; res.cw = cw;
     res.fill = (xmax - xmin + 1) / cw;
+    res.hth = hangulThickness(g, cw, ch);
     const hs = rr.map(([a, b]) => b - a + 1);
     const lh = hs.length ? median(hs) : 0;
     res.nlines = rr.length;
@@ -137,4 +138,82 @@ export function analyze(img, gray, rect, inset = 7) {
     res.ink_bbox = [xmin + x0, ymin + y0, xmax + x0, ymax + y0];
     return res;
   } finally { T.free(); }
+}
+
+// hangul_thickness(g): 한글 음절 크기 덩어리만 4배 확대해 획 두께(원 해상도 px)의 중앙값. 반환 [두께px, 덩어리 수] | null
+export function hangulThickness(g, cw, ch) {
+  const cv = getCv();
+  const T = tracker();
+  try {
+    const gm = T.add(new cv.Mat(ch, cw, cv.CV_8UC1));
+    gm.data.set(g);
+    const big = T.add(new cv.Mat());
+    cv.resize(gm, big, new cv.Size(0, 0), 4, 4, cv.INTER_CUBIC);
+    const bd = new Uint8Array(big.data), bn = big.rows * big.cols;   // 복사본(이후 할당에 안전)
+    const hist = histU8(bd);
+    const bg = f32(percentileU8(hist, bn, 85)), ink = f32(percentileU8(hist, bn, 1.0));
+    if (f32(bg - ink) < 60) return null;
+    const thr = f32(f32(bg + ink) / 2);
+    const m = T.add(new cv.Mat(big.rows, big.cols, cv.CV_8UC1));
+    const md = m.data;
+    for (let i = 0; i < bn; i++) md[i] = bd[i] < thr ? 1 : 0;
+    const lab = T.add(new cv.Mat()), st = T.add(new cv.Mat()), cen = T.add(new cv.Mat());
+    const n = cv.connectedComponentsWithStats(m, lab, st, cen, 8, cv.CV_32S);
+    if (n < 2) return null;
+    const sd = st.data32S;
+    let ih = 0;
+    for (let i = 1; i < n; i++) ih = Math.max(ih, sd[i * 5 + 3]);
+    const keep = new Uint8Array(n);
+    let nk = 0;
+    for (let i = 1; i < n; i++) {
+      const x = sd[i * 5], y = sd[i * 5 + 1], w = sd[i * 5 + 2], h = sd[i * 5 + 3], a = sd[i * 5 + 4];
+      if (h >= 0.7 * ih && w >= 0.75 * h && a > 40 && x > 0 && y > 0 && x + w < big.cols && y + h < big.rows) { keep[i] = 1; nk++; }
+    }
+    if (nk < 1) return null;
+    const ld = new Int32Array(lab.data32S);
+    const km = T.add(new cv.Mat(big.rows, big.cols, cv.CV_8UC1));
+    const kd = km.data;
+    for (let i = 0; i < bn; i++) kd[i] = keep[ld[i]];
+    const dt = T.add(new cv.Mat());
+    cv.distanceTransform(km, dt, cv.DIST_L2, cv.DIST_MASK_PRECISE);
+    const k3 = T.add(cv.Mat.ones(3, 3, cv.CV_8U));
+    const mx = T.add(new cv.Mat());
+    cv.dilate(dt, mx, k3, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+    const dd = dt.data32F, xd = mx.data32F;
+    const eps = f32(1e-3);
+    const vals = [];
+    for (let i = 0; i < bn; i++) if (dd[i] >= f32(xd[i] - eps) && dd[i] >= 2.0) vals.push(f32(f32(2 * dd[i]) / 4.0));
+    if (vals.length < 10) return null;
+    const s = Float32Array.from(vals).sort();
+    const nn = s.length;
+    const med = nn % 2 ? s[(nn - 1) / 2] : f32(f32(s[nn / 2 - 1] + s[nn / 2]) / 2);
+    return [med, nk];
+  } finally { T.free(); }
+}
+
+export const HANGUL_RATIO = 0.88, LATIN_RATIO = 0.72, LEAD = 1.2;
+// 잉크 bbox 높이(px)와 글 내용으로 글자 크기(pt) 추정
+export function sizeFromInk(inkHPx, text, ppm = PPM, nlines = null) {
+  const t = (text || '').replace(/^\n+|\n+$/g, '');
+  const n = Math.max(1, t.split('\n').length, nlines || 1);
+  const hangul = /[\uac00-\ud7a3]/.test(text || '');
+  const ratio = hangul ? HANGUL_RATIO : LATIN_RATIO;
+  const emMm = inkHPx / ppm / (ratio + LEAD * (n - 1));
+  return emMm * 72 / 25.4;
+}
+
+// unify_sizes(items, rel): 인접 값이 rel 이내면 한 단계(중앙값 0.5pt 반올림). 반환 Map(value -> unified)
+export function unifySizes(items, rel = 0.12) {
+  const vals = [...new Set(items)].sort((a, b) => a - b);
+  const groups = [];
+  for (const v of vals) {
+    if (groups.length && v <= groups[groups.length - 1][groups[groups.length - 1].length - 1] * (1 + rel)) groups[groups.length - 1].push(v);
+    else groups.push([v]);
+  }
+  const m = new Map();
+  for (const g of groups) {
+    const c = pyRound(median(g) * 2) / 2;
+    for (const v of g) m.set(v, c);
+  }
+  return m;
 }

@@ -1,6 +1,6 @@
 // sheetparser/preprocess.py 이식: 용지 검출, 원근 보정, 선 마스크, table_rectify, 평탄화.
 // 모든 이미지는 cv.Mat (BGR CV_8UC3). 반환하는 Mat 의 delete() 는 호출자 책임.
-import { getCv, tracker } from './cv.js';
+import { getCv, tracker, copyMat } from './cv.js';
 import { pyRound, pyRoundN, arange, lstsq, percentileSorted } from './npy.js';
 
 export const PPM = 10;
@@ -173,7 +173,7 @@ export function tableRectify(img, keepFrame = false) {
     cv.dilate(m, comb, k5, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
     const lab = T.add(new cv.Mat()), st = T.add(new cv.Mat()), cen = T.add(new cv.Mat());
     const n = cv.connectedComponentsWithStats(comb, lab, st, cen, 8, cv.CV_32S);
-    if (n < 2) return { img: img.clone(), origin: null, ok: false };
+    if (n < 2) return { img: copyMat(img), origin: null, ok: false };
     const sd = st.data32S;
     let main = 1;
     for (let i = 2; i < n; i++) if (sd[i * 5 + 4] > sd[main * 5 + 4]) main = i;
@@ -280,9 +280,8 @@ export function flatten(img, regionPx, ppm = PPM, bs = 8) {
     const sm32 = T.add(cv.matFromArray(h, w, cv.CV_32FC1, surf));
     const big = T.add(new cv.Mat());
     cv.resize(sm32, big, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR);
-    const bd = big.data32F;
     const out = new cv.Mat(H, W, cv.CV_8UC3);
-    const od = out.data, id = img.data;
+    const bd = big.data32F, od = out.data, id = img.data;   // 할당 뒤에 뷰를 가져온다(힙 성장 시 이전 뷰는 무효)
     const lo = f32(0.8), hi = f32(2.2);
     for (let i = 0; i < H * W; i++) {
       let s = bd[i]; if (!(s >= 1)) s = 1;   // np.maximum(surf, 1)

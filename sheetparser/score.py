@@ -209,3 +209,114 @@ def struct_score(pred, gt):
     out["text_rate"] = ok / n if n else 1.0
     out["text_wrong"] = wrong
     return out
+
+
+# ---- v4 (9라운드): 서식 정답 채점. 정답 = 같은 PDF 의 pdf_vector 경로 결과 ----
+def _table_map(spec):
+    """표 칸을 표 로컬 키 (r,c,rs,cs) -> {cell, 테두리 4변(위/아래/왼/오른)} 로. table_view 와 같은 환산."""
+    v = table_view(spec)
+    if v is None:
+        return {}
+    px, py = spec["meta"]["x_mm"], spec["meta"]["y_mm"]
+    ex, ey = v["xs"], v["ys"]
+    ix = lambda val: min(range(len(ex)), key=lambda i: abs(ex[i] - val))
+    iy = lambda val: min(range(len(ey)), key=lambda i: abs(ey[i] - val))
+    bh, bv = spec["borders"]["h"], spec["borders"]["v"]
+    out = {}
+    for c in spec["cells"]:
+        if c.get("role", "table") != "table":
+            continue
+        r0, r1 = iy(py[c["r"]]), iy(py[c["r"] + c["rs"]])
+        c0, c1 = ix(px[c["c"]]), ix(px[c["c"] + c["cs"]])
+        sides = (bh[c["r"]][c["c"]], bh[c["r"] + c["rs"]][c["c"]], bv[c["r"]][c["c"]], bv[c["r"]][c["c"] + c["cs"]])
+        out[(r0, c0, r1 - r0, c1 - c0)] = {"cell": c, "sides": sides}
+    return out
+
+
+def _nlines(c):
+    t = (c.get("text") or "").strip("\n")
+    return len(t.split("\n")) if t else 0
+
+
+def _rate(ok, n):
+    return ok / n if n else 1.0
+
+
+def style_score(pred, gt):
+    """표 칸별 h/v 정렬, bold, 줄 수, 글자 크기(+-1pt), 배경 유무, 테두리 4변 + 표 밖 블록 bold/크기/정렬.
+    기준 칸 = 정답에서 글자가 있는 표 칸(키 (r,c,rs,cs)). 예측에 같은 키 칸이 없으면 모두 불일치로 센다."""
+    pm, gm = _table_map(pred), _table_map(gt)
+    keys = ("h", "v", "align", "bold", "lines", "size", "bg", "border")
+    cnt = {k: [0, 0] for k in keys}
+    miss = {k: [] for k in keys}
+    for key, g in gm.items():
+        gc = g["cell"]
+        p = pm.get(key)
+        pc = p["cell"] if p else None
+        # 테두리/배경: 글자 없는 칸 포함
+        cnt["bg"][1] += 1
+        okbg = pc is not None and bool(pc.get("bg")) == bool(gc.get("bg"))
+        cnt["bg"][0] += okbg
+        if not okbg and len(miss["bg"]) < 6:
+            miss["bg"].append((key, gc.get("bg"), pc.get("bg") if pc else None))
+        for i in range(4):
+            cnt["border"][1] += 1
+            cnt["border"][0] += bool(p) and p["sides"][i] == g["sides"][i]
+        if not _norm(gc.get("text", "")):
+            continue
+        for k in ("h", "v", "bold", "lines", "size", "align"):
+            cnt[k][1] += 1
+        if pc is None:
+            for k in ("h", "v", "bold", "lines", "size", "align"):
+                if len(miss[k]) < 12: miss[k].append((key, "no_cell"))
+            continue
+        res = {"h": pc["h"] == gc["h"], "v": pc["v"] == gc["v"], "bold": bool(pc.get("bold")) == bool(gc.get("bold")),
+               "lines": _nlines(pc) == _nlines(gc), "size": abs(pc.get("size_pt", 0) - gc.get("size_pt", 0)) <= 1.0}
+        res["align"] = res["h"] and res["v"]
+        for k, ok in res.items():
+            cnt[k][0] += ok
+            if not ok and len(miss[k]) < 12:
+                miss[k].append((key, _norm(gc["text"])[:10], {"h": (gc["h"], pc["h"]), "v": (gc["v"], pc["v"]),
+                               "bold": (gc.get("bold"), pc.get("bold")), "lines": (_nlines(gc), _nlines(pc)),
+                               "size": (gc.get("size_pt"), pc.get("size_pt")), "align": (gc["h"], pc["h"], gc["v"], pc["v"])}[k]))
+    out = {"n": cnt["h"][1]}
+    for k in keys:
+        out[k] = _rate(*cnt[k])
+    out["miss"] = miss
+    # 표 밖 블록
+    import difflib
+    gb = [c for c in gt["cells"] if c.get("role") == "text"]
+    pb = [c for c in pred["cells"] if c.get("role") == "text"]
+    used = set()
+    bn = {"bold": 0, "size": 0, "h": 0}
+    bmiss = []
+    for g in gb:
+        best, bi = 0.0, None
+        gcx = (g["src_bbox"][0] + g["src_bbox"][2]) / 2 if g.get("src_bbox") else None
+        gcy = (g["src_bbox"][1] + g["src_bbox"][3]) / 2 if g.get("src_bbox") else None
+        for i, p in enumerate(pb):
+            if i in used:
+                continue
+            s = difflib.SequenceMatcher(None, _norm(g["text"]), _norm(p["text"])).ratio()
+            if gcx is not None and p.get("src_bbox") and s >= 0.4:   # 손글씨 서명에 가린 (서명) 같은 오독은 위치(중심 간격 12mm 이내)로 짝짓는다
+                pcx = (p["src_bbox"][0] + p["src_bbox"][2]) / 2; pcy = (p["src_bbox"][1] + p["src_bbox"][3]) / 2
+                if abs(pcx - gcx) < 12 and abs(pcy - gcy) < 6:
+                    s = max(s, 0.7)
+            if s > best:
+                best, bi = s, i
+        if bi is None or best < 0.7:
+            bmiss.append((_norm(g["text"])[:12], "no_match"))
+            continue
+        used.add(bi)
+        p = pb[bi]
+        bn["bold"] += bool(p.get("bold")) == bool(g.get("bold"))
+        bn["size"] += abs(p.get("size_pt", 0) - g.get("size_pt", 0)) <= 1.0
+        bn["h"] += p.get("h") == g.get("h")
+        for k, a, b in (("bold", g.get("bold"), p.get("bold")), ("size", g.get("size_pt"), p.get("size_pt")), ("h", g.get("h"), p.get("h"))):
+            if (k == "size" and abs((a or 0) - (b or 0)) > 1.0) or (k != "size" and bool(a) != bool(b) if k == "bold" else (k == "h" and a != b)):
+                bmiss.append((_norm(g["text"])[:12], k, a, b))
+    out["blk_n"] = len(gb)
+    for k in ("bold", "size", "h"):
+        out["blk_" + k] = _rate(bn[k], len(gb))
+    out["blk_miss"] = bmiss[:10]
+    return out

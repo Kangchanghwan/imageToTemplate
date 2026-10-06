@@ -32,6 +32,53 @@ def _runs(mask1d, gap):
     return out
 
 
+def _line_bands(rows, y0, gap=4):
+    """행 투영 -> 글줄 띠 [(ya, yb)] (절대 y). 틈 gap px 미만은 같은 줄, 가장 큰 띠 높이의 45% 미만 조각(점, 괄호 끝)은 이웃 줄에 붙인다."""
+    runs = _runs(rows, gap - 1)
+    if not runs:
+        return []
+    mh = max(b - a + 1 for a, b in runs)
+    out = []
+    for a, b in runs:
+        if out and (b - a + 1) < 0.45 * mh:
+            out[-1] = (out[-1][0], b)
+        elif (b - a + 1) < 0.45 * mh and not out:
+            out.append((a, b))
+        else:
+            out.append((a, b))
+    if len(out) > 1 and (out[0][1] - out[0][0] + 1) < 0.45 * mh:   # 맨 앞 조각이 작으면 다음 줄에 붙인다
+        out[1] = (out[0][0], out[1][1]); out = out[1:]
+    return [(a + y0, b + y0) for a, b in out]
+
+
+def hangul_thickness(g, inkmask=None):
+    """한글 음절 크기(높이가 가장 큰 덩어리의 70% 이상, 너비/높이 0.75 이상)의 덩어리만 4배 확대해 획 두께(원 해상도 px)의 중앙값을 잰다.
+    숫자/기호/괄호는 글꼴이 달라 두께가 다르게 나오므로 뺀다. 반환 (두께 px, 덩어리 수) 또는 None."""
+    big = cv2.resize(g, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC).astype(np.float32)
+    bg = np.percentile(big, 85); ink = np.percentile(big, 1.0)
+    if bg - ink < 60:
+        return None
+    m = (big < (bg + ink) / 2).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if n < 2:
+        return None
+    ih = st[1:, 3].max()
+    keep = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if h >= 0.7 * ih and w >= 0.75 * h and a > 40 and x > 0 and y > 0 and x + w < m.shape[1] and y + h < m.shape[0]:
+            keep[i] = True
+    if keep.sum() < 1:
+        return None
+    k = keep[lab].astype(np.uint8)
+    dt = cv2.distanceTransform(k, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    mx = cv2.dilate(dt, np.ones((3, 3), np.uint8))
+    ridge = (dt >= mx - 1e-3) & (dt >= 2.0)
+    if ridge.sum() < 10:
+        return None
+    return float(np.median(2 * dt[ridge] / 4.0)), int(keep.sum())
+
+
 def analyze(img, gray, rect, inset=7):
     x0, y0, x1, y1 = [int(round(v)) for v in rect]
     x0 += inset; y0 += inset; x1 -= inset; y1 -= inset
@@ -74,6 +121,15 @@ def analyze(img, gray, rect, inset=7):
     res["v"] = "MIDDLE" if abs(d) < 0.12 * ch else ("TOP" if d > 0 else "BOTTOM")
     rows = keep.any(1)
     runs = _runs(rows, 2)
+    res["lbands"] = _line_bands(rows, y0)
+    res["lbx"] = []
+    for (ya, yb) in res["lbands"]:
+        cols = np.nonzero(keep[ya - y0:yb - y0 + 1].any(0))[0]
+        if len(cols):
+            res["lbx"].append((int(cols.min()), int(cols.max())))
+    res["gl"], res["gr"], res["cw"] = int(gl), int(gr), int(cw)
+    res["fill"] = float((xs.max() - xs.min() + 1) / cw)
+    res["hth"] = hangul_thickness(g, ink)
     hs = [b - a + 1 for a, b in runs]
     lh = float(np.median(hs)) if hs else 0
     res["nlines"] = len(runs)

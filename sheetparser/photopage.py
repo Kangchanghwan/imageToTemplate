@@ -11,7 +11,7 @@ from . import grid as G, layout as LAY, ocr as OCR, preprocess as PP, style as S
 
 PPM = PP.PPM
 THICK_BIAS_MM = 0.2
-BG_MIN_DROP = 18
+BG_MIN_DROP = 12
 BG_MAX_GRAY = 245      # 평탄화 후 종이=255. 이보다 확실히 어두워야 bg
 BG_MIN_UNIFORM = 0.65  # 칸 내부 균일도
 FONT = "Nanum Gothic"
@@ -69,23 +69,45 @@ def find_blocks(img, fgray, tb):
         ids = ids[ids > 0]
         if len(ids) < 2:
             continue
-        bx = st[ids]
-        hs = bx[:, 3].astype(float)
-        p90 = np.percentile(hs, 90)
-        tall = (hs >= 0.6 * p90) & (hs <= 1.5 * p90)
-        top = int(bx[tall, 1].min()); bot = int((bx[tall, 1] + bx[tall, 3]).max())
-        core_h = float(np.percentile(hs[tall], 70))   # 괄호 등으로 부풀지 않게 글자 하나의 높이
-        xa, xb = int(bx[:, 0].min()), int((bx[:, 0] + bx[:, 2]).max())
-        ya, yb = int(bx[:, 1].min()), int((bx[:, 1] + bx[:, 3]).max())
-        sub = np.isin(lab[ya:yb, xa:xb], ids).astype(np.uint8)
-        cnts, _ = cv2.findContours(sub, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-        per = sum(cv2.arcLength(c, True) for c in cnts)
-        stroke = 2.0 * sub.sum() / per if per else 0
-        ih = bot - top
-        ul = any(t[2] >= 0.6 * (xb - xa) and t[0] >= xa - 3 * PPM and t[0] + t[2] <= xb + 3 * PPM
-                 and 0 <= t[1] - bot <= 4 * PPM for t in thin)
-        out.append({"bbox": (xa, ya, xb, yb), "ink_h": core_h, "bold": bool(ih and stroke / ih > 0.135), "underline": ul,
-                    "stroke_ratio": float(stroke / ih) if ih else 0.0})
+        if len(ids) >= 8:   # 도장/서명 같은 큰 덩어리에 휘둘리지 않게 윗/아랫 끝의 10/90 분위로 글줄 높이를 잰다
+            ext = float(np.percentile(st[ids, 1] + st[ids, 3], 90) - np.percentile(st[ids, 1], 10))
+        else:
+            ext = float((st[ids, 1] + st[ids, 3]).max() - st[ids, 1].min())
+        order = ids[np.argsort(st[ids, 0])]
+        groups, cur, cmx = [], [order[0]], st[order[0], 0] + st[order[0], 2]
+        for i_ in order[1:]:   # 가로로 글줄 높이의 1.25배 넘게 벌어진 곳은 따로 읽는다. 단 표 오른쪽 끝(14mm 안)까지 가는 마지막 조각만
+            if st[i_, 0] - cmx > 1.25 * ext and not groups and st[i_, 0] > (x0 + x1) / 2 and \
+                    (st[order, 0] + st[order, 2]).max() >= x1 - 14 * PPM:
+                groups.append(cur); cur = []
+            cur.append(i_); cmx = max(cmx, st[i_, 0] + st[i_, 2])
+        groups.append(cur)
+        for grp in groups:
+            ids = np.array(grp)
+            if len(ids) < 2:
+                continue
+            bx = st[ids]
+            bx_all = bx
+            if len(bx) >= 4:   # 도장/서명 같은 큰 덩어리(중앙값의 2.2배 초과)는 글자가 아니다
+                okk = bx[:, 3] <= 2.2 * np.median(bx[:, 3])
+                ids, bx = ids[okk], bx[okk]
+                if len(ids) < 2:
+                    continue
+            hs = bx[:, 3].astype(float)
+            p90 = np.percentile(hs, 90)
+            tall = (hs >= 0.6 * p90) & (hs <= 1.5 * p90)
+            top = int(bx[tall, 1].min()); bot = int((bx[tall, 1] + bx[tall, 3]).max())
+            core_h = float(np.percentile(hs[tall], 70))   # 괄호 등으로 부풀지 않게 글자 하나의 높이
+            xa, xb = int(bx_all[:, 0].min()), int((bx_all[:, 0] + bx_all[:, 2]).max())   # 읽기 범위는 도장 덩어리까지 포함 (가려진 글자도 읽어 본다)
+            ya, yb = int(bx_all[:, 1].min()), int((bx_all[:, 1] + bx_all[:, 3]).max())
+            sub = np.isin(lab[ya:yb, xa:xb], ids).astype(np.uint8)
+            cnts, _ = cv2.findContours(sub, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+            per = sum(cv2.arcLength(c, True) for c in cnts)
+            stroke = 2.0 * sub.sum() / per if per else 0
+            ih = bot - top
+            ul = any(t[2] >= 0.6 * (xb - xa) and t[0] >= xa - 3 * PPM and t[0] + t[2] <= xb + 3 * PPM
+                     and 0 <= t[1] - bot <= 4 * PPM for t in thin)
+            out.append({"bbox": (xa, ya, xb, yb), "ink_h": core_h, "ext_small": False, "line": k, "nc": len(bx), "bold": bool(ih and stroke / ih > 0.135), "underline": ul,
+                        "stroke_ratio": float(stroke / ih) if ih else 0.0})
     merged = True
     while merged:
         merged = False
@@ -95,10 +117,10 @@ def find_blocks(img, fgray, tb):
                 ay0, ay1, by0, by1 = a["bbox"][1], a["bbox"][3], b["bbox"][1], b["bbox"][3]
                 ov = min(ay1, by1) - max(ay0, by0)
                 gap = max(a["bbox"][0], b["bbox"][0]) - min(a["bbox"][2], b["bbox"][2])
-                if ov >= 0.6 * min(ay1 - ay0, by1 - by0) and gap <= 20 * PPM:
+                if ov >= 0.6 * min(ay1 - ay0, by1 - by0) and gap <= min(20 * PPM, 2.0 * min(a['ink_h'], b['ink_h']) / 0.88):
                     bb = (min(a["bbox"][0], b["bbox"][0]), min(ay0, by0), max(a["bbox"][2], b["bbox"][2]), max(ay1, by1))
                     big = a if (a["bbox"][3] - a["bbox"][1]) >= (b["bbox"][3] - b["bbox"][1]) else b
-                    out[i] = {"bbox": bb, "ink_h": big["ink_h"], "bold": big["bold"], "underline": a["underline"] or b["underline"],
+                    out[i] = {"bbox": bb, "ink_h": big["ink_h"], "ext_small": big.get("ext_small"), "line": big.get("line"), "nc": a.get("nc", 0) + b.get("nc", 0), "bold": big["bold"], "underline": a["underline"] or b["underline"],
                               "stroke_ratio": big.get("stroke_ratio", 0.0)}
                     del out[j]; merged = True
                     break
@@ -149,6 +171,163 @@ def _extend_left(grid, mask):
                          if not any(cr <= r < cr + crs and cc == 0 for (cr, cc, crs, ccs) in [])])
     g["ext_left"] = True
     return g
+
+
+BOLD_THR = 0.08   # 한글 음절 획 두께 / 글자 크기(em) 가 이 이상이면 굵게 (실측: 보통 0.047~0.075, 굵게 0.093~0.11)
+ALIGN_TOL_MM = 2.0
+
+
+def _maj(vals):
+    return bool(vals) and sum(vals) * 2 > len(vals)
+
+
+def bold_pass(cells, HR, meta):
+    """굵기: 한글 음절 덩어리의 획 두께를 글자 크기(em)로 나눠 쓴다. 숫자 칸은 글꼴이 달라 두께를 못 쓰므로 같은 행의 한글 칸 다수결.
+    머리글 행은 행 단위(다수결), 본문 한글 칸은 칸마다(합계 행처럼 칸마다 다른 원본을 뭉개지 않는다).
+    페이지 전체 분포에 보통/굵게 두 군집이 뚜렷이(간격 0.012 em 이상) 있으면 그 간격 가운데를 문턱으로 쓴다."""
+    vals = {}
+    for c in cells:
+        if not c["text"]:
+            continue
+        h = c["_info"].get("hth")
+        if h:
+            vals[id(c)] = h[0] / (max(c["size_pt"], 1.0) * 25.4 / 72 * PPM)
+    if not vals:
+        return
+    thr = BOLD_THR
+    sv = sorted(vals.values())
+    best = None
+    for a, b in zip(sv, sv[1:]):
+        if 0.06 <= (a + b) / 2 <= 0.105 and b - a >= 0.012 and (best is None or b - a > best[0]):
+            best = (b - a, (a + b) / 2)
+    if best:
+        thr = best[1]
+    meta["bold_thr"] = round(thr, 4)
+    own = {id(c): (vals[id(c)] >= thr) for c in cells if id(c) in vals}
+    hv = [own[id(c)] for c in cells if c["r"] < HR and id(c) in own]
+    rowb = {}
+    for c in cells:
+        if id(c) in own:
+            rowb.setdefault(c["r"], []).append(own[id(c)])
+    for c in cells:
+        if not c["text"]:
+            continue
+        if c["r"] < HR and hv:
+            c["bold"] = _maj(hv)
+        elif id(c) in own:
+            c["bold"] = own[id(c)]
+        else:
+            c["bold"] = _maj(rowb.get(c["r"], []))
+
+
+def align_pass(cells, HR):
+    """가로 정렬. 기본은 좌우 여백 차이 2mm(칸 폭 5% 중 큰 값) 이내면 가운데.
+    - 글줄이 2줄 이상이면 줄들의 왼쪽 끝이 1mm 안에서 같으면 왼쪽, 오른쪽 끝이 같으면 오른쪽 (자동 줄바꿈된 긴 글은 여백이 비슷해 가운데로 오판하기 쉽다).
+    - 글이 칸을 80% 이상 채우는 긴 글(공백 뺀 21자 이상)은 왼쪽.
+    - 여백 차이가 경계 근처(문턱의 1~2배)인 칸은 같은 열(본문)/행(머리글)에서 분명한 칸들의 다수결을 따른다(분명한 칸 3개 이상, 60% 이상)."""
+    dec = {}
+    for c in cells:
+        i = c["_info"]
+        if not c["text"] or "gl" not in i:
+            continue
+        cw = i["cw"] / PPM
+        d = (i["gr"] - i["gl"]) / PPM
+        tol = max(ALIGN_TOL_MM, 0.05 * cw)
+        o = "CENTER" if abs(d) <= tol else ("LEFT" if d > 0 else "RIGHT")
+        weak = tol < abs(d) < 2 * tol
+        lb = i.get("lbx") or []
+        if len(lb) >= 2:
+            s0 = (max(a for a, b in lb) - min(a for a, b in lb)) / PPM
+            s1 = (max(b for a, b in lb) - min(b for a, b in lb)) / PPM
+            if s0 <= 1.0 and s1 > 1.0:
+                o, weak = "LEFT", False
+            elif s1 <= 1.0 and s0 > 1.0:
+                o, weak = "RIGHT", False
+        elif i["fill"] >= 0.8 and len("".join(c["text"].split())) > 20:
+            o, weak = "LEFT", False
+        dec[id(c)] = (o, weak)
+    groups = {}
+    for c in cells:
+        if id(c) in dec:
+            k = ("h", c["r"]) if c["r"] < HR else ("c", c["c"], c["cs"])
+            groups.setdefault(k, []).append(c)
+    for k, cs_ in groups.items():
+        strong = [dec[id(c)][0] for c in cs_ if not dec[id(c)][1]]
+        maj = None
+        if len(strong) >= 3:
+            top, n = Counter(strong).most_common(1)[0]
+            if n >= 0.6 * len(strong):
+                maj = top
+        for c in cs_:
+            o, weak = dec[id(c)]
+            c["h"] = maj if (weak and maj) else o
+
+
+def _cut(text, lines):
+    """text(줄바꿈 없는 글)에서 줄 문자열 lines[:-1] 각각의 끝에 가장 가까운 자리(공백 제외 글자 수 기준)에 줄바꿈. 안 맞으면 None."""
+    from .score import lev
+    idx = [k for k, ch in enumerate(text) if not ch.isspace()]
+    n = len(idx)
+    a, cuts = 0, []
+    for ln in lines[:-1]:
+        L = "".join(ln.split())
+        if not L:
+            return None
+        best = None
+        for j in range(max(a + 1, a + len(L) - 3), min(n - 1, a + len(L) + 3) + 1):
+            e = lev("".join(text[idx[k]] for k in range(a, j)), L)
+            if best is None or e < best[0] or (e == best[0] and abs(j - a - len(L)) < abs(best[1] - a - len(L))):
+                best = (e, j)
+        if best is None or best[0] > max(2, 0.4 * len(L)):
+            return None
+        a = best[1]
+        cuts.append(a)
+    out, prev = [], 0
+    for cj in cuts:
+        out.append(text[prev:idx[cj]].strip()); prev = idx[cj]
+    out.append(text[prev:].strip())
+    return "\n".join(out)
+
+
+def break_pass(flat, cells, meta):
+    """칸 안 글줄 수(이미지의 글줄 띠)가 2 이상이면 줄마다 크롭을 paddle 로 읽어 칸 글자에서 줄바꿈 자리를 찾아 \n 을 넣는다.
+    글자 자체는 칸 전체 읽기 결과를 그대로 쓴다(위치만 맞춘다). 폭 때문에 자동 줄바꿈된 줄도 원본 그대로 둔다."""
+    from concurrent.futures import ThreadPoolExecutor
+    H, W = flat.shape[:2]
+    todo = []
+    for c in cells:
+        i = c["_info"]
+        bands = i.get("lbands") or []
+        if len(bands) >= 2 and len("".join(c["text"].split())) >= 4 and "\n" not in c["text"]:
+            todo.append(c)
+
+    def job(c):
+        x0, y0, x1, y1 = [int(v) for v in c["_rect"]]
+        bands = c["_info"]["lbands"]
+        out = []
+        for k in range(len(bands) - 1):
+            lo = bands[k][0] - 6 if k == 0 else (bands[k - 1][1] + bands[k][0]) // 2
+            hi = (bands[k][1] + bands[k + 1][0]) // 2
+            crop = OCR._ink_tight(flat[max(lo, 0):min(hi + 1, H), max(x0 + 3, 0):min(x1 - 3, W)])
+            try:
+                out.append(OCR._paddle_one(crop, max_tokens=120)[0])
+            except Exception:
+                return None
+        return out
+    if not todo:
+        return
+    with ThreadPoolExecutor(4) as ex:
+        res = list(ex.map(job, todo))
+    meta["calls"] += sum(len(c["_info"]["lbands"]) - 1 for c in todo)
+    nb = 0
+    for c, lines in zip(todo, res):
+        if not lines:
+            meta["break_fail"] = meta.get("break_fail", 0) + 1
+            continue
+        t = _cut(c["text"], lines + ["x"])
+        if t:
+            c["text"] = t; nb += 1
+    meta["breaks"] = nb
 
 
 def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
@@ -393,6 +572,8 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
             c["bold"] = col_b.get(c["c"], body_b)
         elif "_sz" in c:
             c["size_pt"] = round(c["_sz"] * 2) / 2
+    if ocr:
+        break_pass(flat, cells, meta)
     # --- 표 밖 텍스트 ---
     blocks = []
     if True:
@@ -427,19 +608,33 @@ def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind=
             if abs((x0 + x1) / 2 / PPM - (tx0 + tx1) / 2) < 0.06 * (tx1 - tx0) and x0 / PPM > tx0 - 3 and x1 / PPM < tx1 + 3:
                 bb[0], bb[2], hh = tx0, tx1, "CENTER"   # 표 가운데 제목: 표 전체 폭으로 병합 + 가운데 정렬 (넘침/잘림 방지)
             blocks.append({"bbox_mm": bb, "text": t.strip(),
-                           "size_pt": ST.size_from_ink(b["ink_h"], t), "bold": b["bold"], "underline": b["underline"],
+                           "size_pt": ST.size_from_ink(b["ink_h"] * (0.88 if b.get("ext_small") and ("(" in t or ")" in t) else 1.0), t), "bold": b["bold"], "underline": b["underline"],
                            "font": FONT, "italic": False, "color": "#000000", "h": hh, "v": "MIDDLE",
-                           "_stroke": round(b.get("stroke_ratio", 0), 3)})
+                           "_stroke": round(b.get("stroke_ratio", 0), 3), "_line": b.get("line"), "_nc": b.get("nc", 0)})
         meta["sec_blocks"] = round(time.time() - t1, 1)
-    # 페이지 전체 크기 단계
-    allsz = [c["size_pt"] for c in cells if c["text"]] + [b["size_pt"] for b in blocks]
-    if allsz:
-        mp = ST.unify_sizes([round(v * 2) / 2 for v in allsz])
-        for c in cells:
-            if c["text"]:
-                c["size_pt"] = mp[round(c["size_pt"] * 2) / 2]
-        for b in blocks:
-            b["size_pt"] = mp[round(b["size_pt"] * 2) / 2]
+    # 같은 글줄에서 갈라진 조각(작성자 ... / (서명))은 글자 수가 가장 많은(가장 믿을 만한) 조각의 크기를 같이 쓴다. 서명 도장에 가린 조각은 높이가 부풀거나 줄어든다.
+    byl = {}
+    for b in blocks:
+        if b.get("_line") is not None:
+            byl.setdefault(b["_line"], []).append(b)
+    for grp in byl.values():
+        if len(grp) >= 2:
+            ref = max(grp, key=lambda b: b["_nc"])
+            for b in grp:
+                b["size_pt"] = ref["size_pt"]
+            grp.sort(key=lambda b: b["bbox_mm"][0])
+            last = grp[-1]
+            tx0, tx1 = tb[0] / PPM, tb[2] / PPM
+            if last["h"] == "LEFT" and last["bbox_mm"][0] > (tx0 + tx1) / 2 and last["bbox_mm"][2] >= tx1 - 14:
+                last["h"] = "RIGHT"   # 표 오른쪽 끝에 붙은 마지막 조각
+    # 페이지 전체 크기 단계 (표 칸 글자와 표 밖 글줄은 따로 묶는다: 11.0 과 10.5 처럼 가까운 두 단계를 한 단계로 뭉개지 않게)
+    for grp, key in (([c for c in cells if c["text"]], "c"), (blocks, "b")):
+        if grp:
+            mp = ST.unify_sizes([round(g["size_pt"] * 2) / 2 for g in grp])
+            for g in grp:
+                g["size_pt"] = mp[round(g["size_pt"] * 2) / 2]
+    bold_pass([c for c in cells if c["text"]], HR, meta)
+    align_pass([c for c in cells if c["text"]], HR)
     # 제목: 표 가운데에 놓인 본문보다 확연히 큰 글줄은 굵게 (큰 글자는 잉크 두께 비율이 낮게 측정되어 굵기 판정이 늘 보통으로 나온다)
     bsz = [c["size_pt"] for c in cells if c["r"] >= HR and c["text"] and c["cs"] == 1]
     if bsz:

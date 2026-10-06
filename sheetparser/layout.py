@@ -72,10 +72,10 @@ def pad_blocks(blocks, table, page_mm):
         for j, o in enumerate(orig):
             if j == k or o[3] <= y0 or o[1] >= y1:
                 continue
-            if o[0] >= x1 - 0.1:
-                nx1 = min(nx1, o[0] - 0.3)
+            if o[0] >= x1 - 0.1:   # 이웃과 서로 마주 보고 늘어나도 겹치지 않게 둘 사이 가운데까지만
+                nx1 = min(nx1, max(x1, (o[0] + x1) / 2 - 0.15))
             elif o[2] <= x0 + 0.1:
-                nx0 = max(nx0, o[2] + 0.3)
+                nx0 = max(nx0, min(x0, (o[2] + x0) / 2 + 0.15))
         nx0, nx1 = min(nx0, x0), max(nx1, x1)
         if h >= need:
             d = dict(b); d["bbox_mm"] = [nx0, y0, nx1, y1]

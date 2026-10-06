@@ -292,6 +292,17 @@ def run_pdf_page(path, debug_dir=None, page_no=0, font="Calibri"):
             tb = (min(m["x0"] for m in merged), min(m["y0"] for m in merged),
                   max(m["x1"] for m in merged), max(m["y1"] for m in merged))
             cell["h"], cell["v"] = _cell_align(tb, rect)
+            # 여러 줄이면 줄 왼쪽 끝이 같을 때 왼쪽/오른쪽 끝이 같을 때 오른쪽, 칸을 80% 이상 채운 긴 글(21자 초과)은 왼쪽
+            # (자동 줄바꿈된 긴 글은 좌우 여백이 비슷해 가운데로 오판된다)
+            if len(merged) >= 2:
+                s0 = max(m["x0"] for m in merged) - min(m["x0"] for m in merged)
+                s1 = max(m["x1"] for m in merged) - min(m["x1"] for m in merged)
+                if s0 <= 1.5 < s1:
+                    cell["h"] = "LEFT"
+                elif s1 <= 1.5 < s0:
+                    cell["h"] = "RIGHT"
+            elif (tb[2] - tb[0]) >= 0.8 * (rect[2] - rect[0]) and len("".join(cell["text"].split())) > 20:
+                cell["h"] = "LEFT"
             # 시트 글자 크기는 정수(PDF에서 0.975배): 칸 폭에 안 들어가면 한 단계 내린다
             pt = max(1, int(cell["size_pt"] / 0.975 + 0.5))
             tw = max(m["x1"] - m["x0"] for m in merged)

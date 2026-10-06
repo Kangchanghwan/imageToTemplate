@@ -56,9 +56,29 @@ vlm 호출은 llama.cpp `grammar`(GBNF)로 형식을 강제한 압축 텍스트(
 - 표 밖 블록 행 높이: 시트 글줄 높이 = 글자 px x 1.3. 원본 행이 이보다 낮으면 위아래 빈 공간으로 넓힌다(표 선, 다른 블록과 겹치지 않게). 병합 칸은 넘친 글자를 자르므로 정렬 방향으로 가로 여유(굵으면 14%, 아니면 7%, +1mm)를 둔다.
 - 굵기: 굴림 같은 폰트는 이름에 Bold가 없고 텍스트를 fill + stroke(렌더 모드 2, `get_texttrace()`의 type=1, linewidth>0)로 한 번 더 그려 굵게 만든다. `pdfvec.fake_bold_keys`가 stroke로 그려진 글자 원점을 모아 굵게로 판정한다. 사진은 잉크 두께/높이 비율(>0.135)을 쓰고, 머리글은 행 단위, 본문은 열 단위 다수결로 통일한다.
 
+## 운영 (elgrim 컨테이너 2개 상주)
+
+`convert` 기본 OCR 백엔드는 `auto`다. 사진은 paddle(PaddleOCR-VL-1.6), 스캔 PDF와 paddle 결과에 이상(요청 실패, 잉크 있는 칸이 빈 글자, 80자 초과 칸, 표 OCR 실패)이 있는 장은 32B(Qwen3-VL)로 읽는다. `--ocr-backend qwen32b` 등으로 고정할 수 있다.
+
+| 컨테이너 | 모델 | 포트 | GPU | 메모리 |
+|---|---|---|---|---|
+| vlm | Qwen3-VL-32B Q4_K_M + mmproj f16 | 127.0.0.1:18001 | A4000 + TITAN Xp (`-ts 14,14`) | A4000 약 12.9GB, TITAN 약 10.2GB (부하 시 A4000 약 +1.2GB) |
+| paddle | PaddleOCR-VL-1.6 + mmproj | 127.0.0.1:18003 | A4000 | 약 2.0GB |
+
+합계(부하 중 최대): A4000 14,973 / 16,376MiB (여유 약 1.4GB), TITAN Xp 10,243 / 12,288MiB, GTX 1050은 미사용.
+
+재기동 명령(둘 다 `--restart on-failure:5`):
+
+```
+docker run -d --name vlm --gpus all -e CUDA_VISIBLE_DEVICES=0,1 -v /home/elgrim/models/qwen3vl:/m -p 127.0.0.1:18001:8080 --restart on-failure:5 ghcr.io/ggml-org/llama.cpp:server-cuda -m /m/qwen3vl-32b-q4_k_m.gguf --mmproj /m/mmproj-32b-f16.gguf -ngl 99 -ts 14,14 -c 8192 -ctk q8_0 -ctv q8_0 -fa on --jinja --parallel 1 --host 0.0.0.0 --port 8080 -a qwen3-vl-32b
+docker run -d --name paddle --gpus all -e CUDA_VISIBLE_DEVICES=0 -v /home/elgrim/models/paddle:/m -p 127.0.0.1:18003:8080 --restart on-failure:5 ghcr.io/ggml-org/llama.cpp:server-cuda -m /m/gguf/PaddleOCR-VL-1.6-GGUF.gguf --mmproj /m/gguf/PaddleOCR-VL-1.6-GGUF-mmproj.gguf -ngl 99 -c 8192 --parallel 4 --host 0.0.0.0 --port 8080 --jinja -a paddle
+```
+
+주의: 실측은 vlm을 먼저, paddle을 나중에 올린 순서다(반대 순서는 시험하지 않았다). 32B 컨텍스트는 8192이고 가장 긴 요청은 약 4,300 프롬프트 + 약 870 생성 토큰이다. 복구(예전 단독 설정)는 `-c 16384`, KV 옵션 제거, paddle 컨테이너 제거.
+
 ## 한계
 
-- 사진 경로는 vlm 호출이 필요하다(장당 20~55초). 스캔 PDF는 큰 이미지라 더 걸린다(약 60초).
+- 사진은 paddle로 장당 약 10초(변환 2초 + 업로드 8초), 스캔 PDF는 32B 표 호출이 필요해 약 60초다. paddle이 내려가 있으면 auto는 장마다 32B로 되돌아간다(장당 40~55초).
 - pdf_scan/photo는 서명 같은 떠 있는 이미지를 시트에 재현하지 않는다(PDF 벡터만 재현). 서명 줄은 글자만 남는다.
 - 사진/스캔의 굵기 판정은 잉크 두께 기반이라 저해상도에서 머리글 굵기를 놓치거나 숫자 열을 굵게 오판할 수 있다. 제목은 "표 가운데의 본문보다 1.2배 이상 큰 글줄은 굵게" 규칙을 쓴다.
 - 시트 쪽 글꼴(Calibri/Nanum Gothic 대체)이 원본(굴림 등)과 달라 글줄 폭이 조금 다르다. 좁은 열의 머리글은 한글이 줄바꿈될 수 있다.

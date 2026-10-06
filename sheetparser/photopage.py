@@ -130,7 +130,7 @@ def _extend_left(grid, mask):
     return g
 
 
-def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
+def _run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
     """kind="pdf_scan": 입력이 이미 10px/mm 로 정규화된 용지 이미지이므로 원근 보정을 생략한다."""
     t0 = time.time()
     OCR.stats_reset()
@@ -212,13 +212,13 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
                         if mr < b < mr + mrs:
                             b = mr + mrs; moved = True
                 chunks.append((a, b)); a = b
-        paddle = OCR.BACKEND in ("paddle", "hybrid")
+        paddle = OCR.ACTIVE in ("paddle", "hybrid")
         rowmode = sparse and R > 8 and not paddle   # 빈 양식: 잉크 있는 행만 행 단위로 읽는다 (열/행 밀림 방지)
         if paddle:
             chunks = []
             mat, pconf = OCR.paddle_cells(flat, cells, R, C)
             meta["calls"] += sum(1 for c in cells if not c["_empty"])
-            if OCR.BACKEND == "hybrid":
+            if OCR.ACTIVE == "hybrid":
                 mat = OCR.hybrid_fix(flat, cells, mat, pconf, xs_mm, C, meta)
         elif rowmode:
             chunks = []
@@ -354,7 +354,7 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
                 flags.append({"reason": "block_dropped_outside_paper_or_tiny", "bbox_mm": [round(v / PPM, 1) for v in b["bbox"]]})
                 continue
             if ocr:
-                t = OCR.read_line_paddle(flat, b["bbox"]) if OCR.BACKEND == "paddle" else OCR.read_line(flat, b["bbox"])
+                t = OCR.read_line_paddle(flat, b["bbox"]) if OCR.ACTIVE in ("paddle", "hybrid") else OCR.read_line(flat, b["bbox"])
                 meta["calls"] += 1
             else:
                 t = "x"
@@ -435,3 +435,39 @@ def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="
         cv2.imwrite(rp, img, [cv2.IMWRITE_JPEG_QUALITY, 90])
         spec["meta"]["rectified"] = rp
     return spec
+
+
+def run_page(path, ocr=True, debug_dir=None, source_path=None, img0=None, kind="photo"):
+    """OCR 백엔드 진입점. auto 면 사진(kind=photo)은 paddle, 스캔 PDF(pdf_scan)는 32B.
+    paddle 결과에 이상(요청 실패, 잉크 있는 칸이 빈 글자, 80자 초과 칸, 예외)이 있으면 그 장은 32B 로 다시 읽는다."""
+    kw = dict(path=path, ocr=ocr, debug_dir=debug_dir, source_path=source_path, img0=img0, kind=kind)
+    if OCR.BACKEND != "auto":
+        OCR.ACTIVE = OCR.BACKEND
+        sp = _run_page(**kw)
+        sp["meta"]["ocr_backend"] = OCR.ACTIVE
+        return sp
+    if kind != "photo" or not ocr:
+        OCR.ACTIVE = "qwen32b"
+        sp = _run_page(**kw)
+        sp["meta"]["ocr_backend"] = "qwen32b"
+        return sp
+    OCR.ACTIVE = "paddle"
+    OCR.PADDLE_STATS.update({"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0, "fail": 0, "empty": 0, "long": 0})
+    reason = None
+    try:
+        sp = _run_page(**kw)
+        st = OCR.PADDLE_STATS
+        if st["fail"] or st["empty"] or st["long"]:
+            reason = "paddle fail=%d empty=%d long=%d" % (st["fail"], st["empty"], st["long"])
+        elif any(f.get("reason") == "table_ocr_failed" for f in sp.get("flags", [])):
+            reason = "table_ocr_failed"
+    except Exception as e:
+        reason = "paddle exception: %s" % e
+    if reason is None:
+        sp["meta"]["ocr_backend"] = "paddle"
+        return sp
+    OCR.ACTIVE = "qwen32b"
+    sp = _run_page(**kw)
+    sp["meta"]["ocr_backend"] = "qwen32b"
+    sp["meta"]["auto_fallback"] = reason
+    return sp

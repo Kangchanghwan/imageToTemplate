@@ -67,8 +67,8 @@ def main():
     cv = sub.add_parser("convert", help="입력(pdf/jpg/png) 자동 판별 -> 시트 -> 검증 요약")
     cv.add_argument("input"); cv.add_argument("-o", default=None); cv.add_argument("--title")
     cv.add_argument("--verify", action="store_true", help="시트 PDF 내보내기 + 원본 겹쳐 채점 + 정답 채점 (기본은 업로드 후 URL만)")
-    cv.add_argument("--ocr-backend", default="qwen32b", choices=["paddle", "qwen8b", "qwen32b", "hybrid"],
-                    help="사진 경로 OCR 백엔드 (기본 qwen32b). 주소는 환경변수 VLM_URL / VLM8_URL / PADDLE_URL")
+    cv.add_argument("--ocr-backend", default="auto", choices=["auto", "paddle", "qwen8b", "qwen32b", "hybrid"],
+                    help="OCR 백엔드. auto = 사진은 paddle(이상 시 32B), 스캔 PDF는 32B. (기본 auto). 주소는 환경변수 VLM_URL / VLM8_URL / PADDLE_URL")
     cv.add_argument("--keep", action="store_true", help="시트 유지 (기본 동작)"); cv.add_argument("--delete", action="store_true", help="검증 후 시트 삭제")
     a = ap.parse_args()
     if a.cmd == "run":

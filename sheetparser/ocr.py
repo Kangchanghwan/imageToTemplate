@@ -227,18 +227,19 @@ def read_row(img, bbox, widths, want=None):
 
 
 # ---- 5라운드: 백엔드 선택 (paddle | qwen8b | qwen32b | hybrid) ----
-BACKEND = os.environ.get("OCR_BACKEND", "qwen32b")
+BACKEND = os.environ.get("OCR_BACKEND", "auto")
 URLS = {"qwen32b": os.environ.get("VLM_URL", "http://127.0.0.1:18001/v1/chat/completions"),
         "qwen8b": os.environ.get("VLM8_URL", "http://127.0.0.1:18002/v1/chat/completions"),
         "paddle": os.environ.get("PADDLE_URL", "http://127.0.0.1:18003/v1/chat/completions")}
-PADDLE_STATS = {"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0}
+PADDLE_STATS = {"calls": 0, "sec": 0.0, "suspect": 0, "requery": 0, "fail": 0, "empty": 0, "long": 0}
+ACTIVE = BACKEND   # 이번 장에서 실제로 쓰는 백엔드 (auto 는 photopage.run_page 가 장마다 정한다)
 
 
 def set_backend(name):
     """qwen8b 는 표 전체 호출 경로를 그대로 쓰되 서버 주소만 바꾼다. paddle 은 칸 단위 크롭 병렬 호출. hybrid 는 paddle + 의심 칸만 32B."""
-    global BACKEND, URL
-    BACKEND = name
-    URL = URLS["qwen8b"] if name == "qwen8b" else URLS["qwen32b"]
+    global BACKEND, URL, ACTIVE
+    BACKEND = ACTIVE = name
+    URL = URLS["qwen8b"] if name == "qwen8b" else URLS["qwen32b"]   # auto 의 32B 경로도 qwen32b 주소
 
 
 def _paddle_one(crop, url=None):
@@ -292,6 +293,7 @@ def paddle_cells(img, cells, R, C, workers=int(os.environ.get("PADDLE_WORKERS", 
                 return _paddle_one(crop)
             except Exception:
                 time.sleep(1)
+        PADDLE_STATS["fail"] += 1
         return "", 0.0
     t0 = time.time()
     with ThreadPoolExecutor(workers) as ex:
@@ -303,6 +305,10 @@ def paddle_cells(img, cells, R, C, workers=int(os.environ.get("PADDLE_WORKERS", 
     for c, (t, p) in zip(todo, res):
         mat[c["r"]][c["c"]] = t
         conf[(c["r"], c["c"])] = p
+        if not t:
+            PADDLE_STATS["empty"] += 1
+        elif len(t) > 80:
+            PADDLE_STATS["long"] += 1
     return mat, conf
 
 

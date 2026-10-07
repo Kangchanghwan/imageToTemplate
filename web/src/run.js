@@ -14,6 +14,11 @@ import * as P from './passes.js';
 import * as L from './layout.js';
 import * as O from './ocr_cv.js';
 import { pyRound, pyRoundN, percentile, median } from './npy.js';
+import { scanNormalize } from './front.js';
+import { isPdfBytes, openFirstPage } from './pdf/file.js';
+import { runPdfPage, pdfImages } from './pdf/pipeline.js';
+import { renderWithCanvas, renderImageOnly, isImageOnly } from './pdf/render.js';
+import { bgrToMat } from './cv.js';
 
 const PPM = 10;
 const THICK_BIAS_MM = 0.2;
@@ -258,4 +263,56 @@ export async function runPage(img0, kind = 'photo', opts = {}) {
   for (const m of [opts.keepRect ? null : front.rect, front.flat, front.fgray, front.mask, front.hb, front.vb]) if (m) m.delete();
   if (opts.keepRect) result.rect = rect;
   return result;
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// 파일 진입점 (convert.convert 의 입력 판별 + 경로 분기). 다중 페이지 PDF 는 Python 과 같이 첫 페이지만 처리한다.
+//   bytes: Uint8Array, opts: {
+//     name,                    원본 파일명(spec.source.path)
+//     ocr,                     runPage 의 opts.ocr (photo / pdf_scan 에서 사용)
+//     decodeImage(bytes,name)  -> {w,h,data(BGR)}  (photo 용. 브라우저 기본: browser_io.decodeImage)
+//     createCanvas(w,h)        pdf_scan 렌더(브라우저). 없고 이미지뿐인 스캔이면 OpenCV 로 직접 배치.
+//     scanRender(page,E,dpi)   -> BGR cv.Mat  (렌더 주입: Python 렌더 PNG 고정 대조 등)
+//     encodePng(w,h,rgba)      -> base64 (pdf_vector 이미지)
+//     dpi=300 }
+// 반환 {spec, kind: 'photo'|'pdf_vector'|'pdf_scan', pageCount, timing}
+export async function runFile(bytes, opts = {}) {
+  const cv = getCv();
+  const name = opts.name ?? '';
+  const timing = {};
+  let t = performance.now();
+  const lap = (k) => { const n = performance.now(); timing[k] = Math.round((n - t) * 10) / 10; t = n; };
+  if (!isPdfBytes(bytes, name)) {
+    if (!opts.decodeImage) throw new Error('decodeImage 가 필요하다');
+    const img = await opts.decodeImage(bytes, name);
+    lap('decode');
+    const m = bgrToMat(img);
+    const r = await runPage(m, 'photo', { ocr: opts.ocr, sourcePath: name });
+    m.delete();
+    r.spec.source.kind = 'photo';
+    return { spec: r.spec, kind: 'photo', pageCount: 1, timing: { ...timing, ...r.timing } };
+  }
+  const { page, E, pageCount, kind } = await openFirstPage(bytes);
+  lap('pdf_open_extract');
+  if (kind === 'pdf_vector') {
+    const images = opts.encodePng ? await pdfImages(E, opts.encodePng) : [];
+    const spec = runPdfPage(E, { path: name, images });
+    spec.source.kind = 'pdf_vector';
+    lap('pdf_vector');
+    return { spec, kind, pageCount, timing };
+  }
+  const dpi = opts.dpi ?? 300;
+  let img300;
+  if (opts.scanRender) img300 = await opts.scanRender(page, E, dpi);
+  else if (opts.createCanvas) img300 = await renderWithCanvas(page, dpi, opts.createCanvas);
+  else if (isImageOnly(E)) img300 = renderImageOnly(E, dpi);
+  else throw new Error('pdf_scan 렌더에는 createCanvas(브라우저 캔버스)가 필요하다');
+  lap('pdf_render');
+  const norm = scanNormalize(img300, dpi);
+  img300.delete();
+  const r = await runPage(norm, 'pdf_scan', { ocr: opts.ocr, sourcePath: name });
+  norm.delete();
+  r.spec.source.kind = 'pdf_scan';
+  return { spec: r.spec, kind, pageCount, timing: { ...timing, ...r.timing } };
 }

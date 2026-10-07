@@ -5,9 +5,11 @@
   "type": "module",
   "description": "sheetparser 사진/스캔 경로 CV 이식(OpenCV.js). 브라우저와 Node 공용 ES 모듈.",
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.10",
     "@techstark/opencv-js": "5.0.0-release.1",
     "onnxruntime-node": "^1.30.0",
-    "onnxruntime-web": "^1.30.0"
+    "onnxruntime-web": "^1.30.0",
+    "pdfjs-dist": "^6.4.299"
   },
   "devDependencies": {
     "jpeg-js": "0.4.4",

@@ -32,3 +32,15 @@ export async function loadPpocr(threads = 4) {
   const M = path.join(root, 'web/models');
   return createPpocr({ ort, recModel: fs.readFileSync(path.join(M, 'rec_ko.onnx')), detModel: fs.readFileSync(path.join(M, 'det_mobile.onnx')), dictText: fs.readFileSync(path.join(M, 'dict_ko.txt'), 'utf8'), threads });
 }
+
+export function encodePngRgbaB64(w, h, rgba) {
+  const p = new PNG({ width: w, height: h });
+  p.data = Buffer.from(rgba.buffer, rgba.byteOffset, rgba.length);
+  return PNG.sync.write(p).toString('base64');
+}
+export async function loadPdfEnv() {
+  const { loadNodeCv } = await import(path.join(root, 'web/src/node_cv.js'));
+  await loadNodeCv();
+  const { loadNodePdfjs } = await import(path.join(root, 'web/src/pdf/node_pdfjs.js'));
+  await loadNodePdfjs();
+}

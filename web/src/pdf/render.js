@@ -48,12 +48,18 @@ export function renderImageOnly(E, dpi) {
     src.delete();
     // 이미지 연속좌표 (X=i, Y=j) -> 장치(px). u=X/w, v=1-Y/h, [x,y]=ctm*[u,v]
     const a = c[0] * s / i.width, b = c[1] * s / i.width, cc = -c[2] * s / i.height, d = -c[3] * s / i.height;
-    const e = (c[2] + c[4]) * s, f = (c[3] + c[5]) * s;
-    // OpenCV 는 픽셀 중심을 정수로 쓰므로 반 픽셀 보정
-    const e2 = e + (a + cc) * 0.5 - 0.5, f2 = f + (b + d) * 0.5 - 0.5;
-    const M = cv.matFromArray(2, 3, cv.CV_64FC1, [a, cc, e2, b, d, f2]);
+    let e = (c[2] + c[4]) * s, f = (c[3] + c[5]) * s;
+    let flag = cv.INTER_LINEAR;
+    const axisAligned = Math.abs(b) < 1e-9 && Math.abs(cc) < 1e-9;
+    if (axisAligned && !i.interpolate) {
+      // MuPDF 는 보간 없는 이미지를 최근접으로, 원점을 정수 화소로 맞춰 그린다(실측: 스캔 3종에서 PyMuPDF 렌더와 화소 단위로 일치).
+      // OpenCV 최근접은 round(inv) 이므로 src = floor((x-o)/s) 가 되게 tx = o + 0.5*s 로 둔다.
+      flag = cv.INTER_NEAREST;
+      e = Math.round(e) + 0.5 * a; f = Math.round(f) + 0.5 * d;
+    } else { e = e + (a + cc) * 0.5 - 0.5; f = f + (b + d) * 0.5 - 0.5; }
+    const M = cv.matFromArray(2, 3, cv.CV_64FC1, [a, cc, e, b, d, f]);
     const warped = new cv.Mat();
-    cv.warpAffine(bgr, warped, M, new cv.Size(W, H), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 0));
+    cv.warpAffine(bgr, warped, M, new cv.Size(W, H), flag, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 0));
     warped.copyTo(out);
     bgr.delete(); M.delete(); warped.delete();
   }

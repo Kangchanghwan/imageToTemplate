@@ -39,7 +39,7 @@ for (const name of names) {
   P.text_lines.forEach((l, i) => { const t = S.text_lines[i]; if (!t) return; nch += l.chars.length; if (!eq(l, t)) lb++; });
   r.lines = { n: P.text_lines.length, chars: nch, bad: lb };
   r.underline = eq(P.underline, S.underline);
-  r.fills = { n: P.fills.length, bad: eq(P.fills, S.fills) ? 0 : 1 };
+  r.fills = { n: P.fills.length, bad: (P.fills.length === S.fills.length && P.fills.every((f, i) => f[4] === S.fills[i][4] && f.slice(0, 4).every((v, k) => Math.abs(v - S.fills[i][k]) < 1e-4))) ? 0 : 1 };   // 래 rect 는 float32 한 칸 허용
   r.mask = { shape: eq(P.mask.shape, S.mask.shape), nz: [P.mask.nz, S.mask.nz], sha: P.mask.sha === S.mask.sha };
   r.images = { n: P.images.length, bbox: eq(P.images.map((i) => i.bbox.map(f32)), S.images.map((i) => i.bbox)) };
   r.info = eq(P.info.rect, S.info.rect) && P.info.ndrawings === S.info.ndrawings && P.info.is_vector === S.info.is_vector;

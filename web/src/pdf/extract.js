@@ -64,7 +64,7 @@ export async function extractPage(page, opts = {}) {
     const d = fdesc.get(raw) ?? fdesc.get(raw.replace(/^[A-Z]{6}\+/, '')) ?? null;
     let asc = d && d.ascent !== null ? d.ascent : Math.trunc(f.ascent * 1000) / 1000;
     let desc = d && d.descent !== null ? d.descent : Math.trunc(f.descent * 1000) / 1000;
-    const info = { id, raw, name: clean, ascender: f32(asc), descender: f32(desc), composite: !!f.composite, vertical: !!f.vertical, descFlags: d ? d.flags : 0,
+    const info = { id, raw, name: clean, ascender: f32(asc), descender: f32(desc), composite: !!f.composite, vertical: !!f.vertical, descFlags: d ? d.flags : 0, bbox: f.bbox ? Array.from(f.bbox) : null,
       bold: /bold/i.test(clean) || !!(d && (d.flags & 0x40000)) };
     fonts.set(id, info);
     return info;
@@ -72,6 +72,7 @@ export async function extractPage(page, opts = {}) {
 
   // 그래픽 상태
   let ctm = base.slice();
+  let clipRect = null, pendingClip = false;   // 축 평행 클립 사각형(장치 좌표)의 교집합
   const stack = [];
   let fill = [0, 0, 0], stroke = [0, 0, 0], lineWidth = 1;
   // 텍스트 상태
@@ -144,7 +145,7 @@ export async function extractPage(page, opts = {}) {
       const full = concat(concat([tsm[0], 0, 0, tsm[3], 0, 0], tm.slice(0, 4).concat([0, 0])), ctm.slice(0, 4).concat([0, 0]));
       const size = expansion(full);
       const w0 = f32(f32(g.width) * K001);
-      glyphs.push({ c: g.unicode ?? '', ox: o[0], oy: o[1], w0, size, font: fi, mode: tr, color: fill.slice(), dir: size ? [full[0] / Math.hypot(full[0], full[1]), full[1] / Math.hypot(full[0], full[1])] : [1, 0], seq: seq++ });
+      glyphs.push({ clip: clipRect ? clipRect.slice() : null, c: g.unicode ?? '', ox: o[0], oy: o[1], w0, size, font: fi, mode: tr, color: fill.slice(), dir: size ? [full[0] / Math.hypot(full[0], full[1]), full[1] / Math.hypot(full[0], full[1])] : [1, 0], seq: seq++ });
       let tx = f32(f32(f32(w0 * fsize) + tc) * th);
       if (!fi.composite && g.originalCharCode === 32) tx = f32(tx + f32(tw * th));
       tm = preTranslate(tm, tx, 0);
@@ -154,15 +155,21 @@ export async function extractPage(page, opts = {}) {
   for (let i = 0; i < ol.fnArray.length; i++) {
     const fn = ol.fnArray[i], a = ol.argsArray[i];
     switch (fn) {
-      case OPS.save: stack.push({ ctm: ctm.slice(), fill: fill.slice(), stroke: stroke.slice(), lineWidth }); break;
-      case OPS.restore: { const s = stack.pop(); if (s) { ctm = s.ctm; fill = s.fill; stroke = s.stroke; lineWidth = s.lineWidth; } break; }
+      case OPS.save: stack.push({ ctm: ctm.slice(), fill: fill.slice(), stroke: stroke.slice(), lineWidth, clipRect }); break;
+      case OPS.restore: { const s = stack.pop(); if (s) { ctm = s.ctm; fill = s.fill; stroke = s.stroke; lineWidth = s.lineWidth; clipRect = s.clipRect; } break; }
       case OPS.transform: ctm = concat(a.map(f32), ctm); break;
       case OPS.setLineWidth: lineWidth = f32(a[0]); break;
       case OPS.setFillRGBColor: fill = hexToRgb(a[0]); break;
       case OPS.setStrokeRGBColor: stroke = hexToRgb(a[0]); break;
+      case OPS.clip: case OPS.eoClip: pendingClip = true; break;
       case OPS.constructPath: {
         const pop = a[0], data = a[1][0];
         const items = data && data.length ? buildPath(data) : [];
+        if (pendingClip) {
+          pendingClip = false;
+          const r = rectOf(items);
+          clipRect = clipRect ? [Math.max(clipRect[0], r[0]), Math.max(clipRect[1], r[1]), Math.min(clipRect[2], r[2]), Math.min(clipRect[3], r[3])] : r;
+        }
         curPath = items;
         if (pop === OPS.stroke || pop === OPS.closeStroke) paint('s', pop);
         else if (pop === OPS.fill || pop === OPS.eoFill) paint('f', pop);
